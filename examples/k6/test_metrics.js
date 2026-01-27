@@ -8,9 +8,9 @@ import { sleep, check } from 'k6';
 
 export const options = {
     // Number of virtual users
-    vus: 10,
+    vus: 100,
     // Duration of the test
-    duration: '30s',
+    duration: '30m',
     // Success thresholds
     thresholds: {
         http_req_failed: ['rate<0.01'], // fail rate < 1%
@@ -27,5 +27,5 @@ export default function () {
         'status is 200': (r) => r.status === 200,
     });
 
-    sleep(1);
+    // sleep(1);
 }

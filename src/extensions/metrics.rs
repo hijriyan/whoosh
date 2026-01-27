@@ -4,7 +4,6 @@ use crate::error::WhooshError;
 use crate::server::context::AppCtx;
 use crate::server::extension::WhooshExtension;
 use async_trait::async_trait;
-use dashmap::DashMap;
 use pingora::Error;
 use pingora::http::ResponseHeader;
 use pingora::proxy::{ProxyHttp, Session, http_proxy_service};
@@ -14,6 +13,15 @@ use prometheus::{
     Encoder, GaugeVec, HistogramOpts, HistogramVec, IntCounterVec, Opts, Registry, TextEncoder,
 };
 use std::sync::Arc;
+
+// Metric Names
+pub const METRIC_HEARTBEAT: &str = "whoosh_heartbeat";
+pub const METRIC_ACTIVE_CONNECTIONS: &str = "whoosh_active_connections";
+pub const METRIC_ROUTER_DURATION: &str = "whoosh_router_duration_seconds";
+pub const METRIC_TRANSFORMER_DURATION: &str = "whoosh_transformer_duration_seconds";
+pub const METRIC_REQUESTS_TOTAL: &str = "whoosh_requests_total";
+pub const METRIC_REQUEST_DURATION: &str = "whoosh_request_duration_seconds";
+pub const METRIC_WS_EXTENSION_DURATION: &str = "whoosh_websocket_extension_duration_seconds";
 
 pub struct MetricsExtension;
 
@@ -26,6 +34,12 @@ impl WhooshExtension for MetricsExtension {
         if let Some(listen_addr) = &config.metrics_listen {
             log::info!("Initializing Prometheus metrics backend on {}", listen_addr);
             let backend = PrometheusBackend::new();
+
+            // Pre-initialize metrics
+            backend
+                .init_metrics()
+                .map_err(|e| WhooshError::Other(format!("Failed to initialize metrics: {}", e)))?;
+
             app_ctx.insert(backend);
             let backend = app_ctx.get::<PrometheusBackend>().ok_or_else(|| {
                 WhooshError::Other("Failed to retrieve PrometheusBackend from AppCtx".to_string())
@@ -40,7 +54,7 @@ impl WhooshExtension for MetricsExtension {
             server.add_service(service);
 
             // Register a heartbeat metric to ensure registry is not empty at startup
-            backend.set_gauge("whoosh_heartbeat", 1.0, &[]);
+            backend.heartbeat.with_label_values(&[]).set(1.0);
             log::info!("Metrics service registered and heartbeat initialized");
         }
 
@@ -50,19 +64,83 @@ impl WhooshExtension for MetricsExtension {
 
 pub struct PrometheusBackend {
     registry: Registry,
-    counters: DashMap<String, IntCounterVec>,
-    gauges: DashMap<String, GaugeVec>,
-    histograms: DashMap<String, HistogramVec>,
+    // Pre-defined metrics
+    pub heartbeat: GaugeVec,
+    pub active_connections: GaugeVec,
+    pub router_duration: HistogramVec,
+    pub transformer_duration: HistogramVec,
+    pub requests_total: IntCounterVec,
+    pub request_duration: HistogramVec,
+    pub ws_extension_duration: HistogramVec,
 }
 
 impl PrometheusBackend {
     pub fn new() -> Self {
+        let registry = Registry::new();
+
+        // We use dummy metrics for now and replace them in init_metrics
+        // Alternatively, we could use Option or once_cell, but this is simpler for now.
+        // Actually, let's initialize them with the registry directly.
+
+        let heartbeat = GaugeVec::new(Opts::new(METRIC_HEARTBEAT, METRIC_HEARTBEAT), &[]).unwrap();
+        let active_connections = GaugeVec::new(
+            Opts::new(METRIC_ACTIVE_CONNECTIONS, METRIC_ACTIVE_CONNECTIONS),
+            &[],
+        )
+        .unwrap();
+        let router_duration = HistogramVec::new(
+            HistogramOpts::new(METRIC_ROUTER_DURATION, METRIC_ROUTER_DURATION),
+            &[],
+        )
+        .unwrap();
+        let transformer_duration = HistogramVec::new(
+            HistogramOpts::new(METRIC_TRANSFORMER_DURATION, METRIC_TRANSFORMER_DURATION),
+            &["type"],
+        )
+        .unwrap();
+        let requests_total = IntCounterVec::new(
+            Opts::new(METRIC_REQUESTS_TOTAL, METRIC_REQUESTS_TOTAL),
+            &["status"],
+        )
+        .unwrap();
+        let request_duration = HistogramVec::new(
+            HistogramOpts::new(METRIC_REQUEST_DURATION, METRIC_REQUEST_DURATION),
+            &["type"],
+        )
+        .unwrap();
+        let ws_extension_duration = HistogramVec::new(
+            HistogramOpts::new(METRIC_WS_EXTENSION_DURATION, METRIC_WS_EXTENSION_DURATION),
+            &["direction"],
+        )
+        .unwrap();
+
         Self {
-            registry: Registry::new(),
-            counters: DashMap::new(),
-            gauges: DashMap::new(),
-            histograms: DashMap::new(),
+            registry,
+            heartbeat,
+            active_connections,
+            router_duration,
+            transformer_duration,
+            requests_total,
+            request_duration,
+            ws_extension_duration,
         }
+    }
+
+    pub fn init_metrics(&self) -> Result<(), prometheus::Error> {
+        self.registry.register(Box::new(self.heartbeat.clone()))?;
+        self.registry
+            .register(Box::new(self.active_connections.clone()))?;
+        self.registry
+            .register(Box::new(self.router_duration.clone()))?;
+        self.registry
+            .register(Box::new(self.transformer_duration.clone()))?;
+        self.registry
+            .register(Box::new(self.requests_total.clone()))?;
+        self.registry
+            .register(Box::new(self.request_duration.clone()))?;
+        self.registry
+            .register(Box::new(self.ws_extension_duration.clone()))?;
+        Ok(())
     }
 
     pub fn encode(&self) -> String {
@@ -73,98 +151,42 @@ impl PrometheusBackend {
         String::from_utf8(buffer).unwrap()
     }
 
-    fn get_or_create_counter(&self, name: &str, label_keys: &[&str]) -> Option<IntCounterVec> {
-        if let Some(counter) = self.counters.get(name) {
-            return Some(counter.clone());
-        }
+    // --- High Performance API (No string lookups for name) ---
 
-        let opts = Opts::new(name, name);
-        let counter = IntCounterVec::new(opts, label_keys).ok()?;
-        self.registry.register(Box::new(counter.clone())).ok()?;
-        self.counters.insert(name.to_string(), counter.clone());
-        Some(counter)
+    pub fn inc_active_connections(&self) {
+        self.active_connections.with_label_values(&[]).inc();
     }
 
-    fn get_or_create_gauge(&self, name: &str, label_keys: &[&str]) -> Option<GaugeVec> {
-        if let Some(gauge) = self.gauges.get(name) {
-            return Some(gauge.clone());
-        }
-
-        let opts = Opts::new(name, name);
-        let gauge = GaugeVec::new(opts, label_keys).ok()?;
-        self.registry.register(Box::new(gauge.clone())).ok()?;
-        self.gauges.insert(name.to_string(), gauge.clone());
-        Some(gauge)
+    pub fn dec_active_connections(&self) {
+        self.active_connections.with_label_values(&[]).dec();
     }
 
-    fn get_or_create_histogram(&self, name: &str, label_keys: &[&str]) -> Option<HistogramVec> {
-        if let Some(histogram) = self.histograms.get(name) {
-            return Some(histogram.clone());
-        }
-
-        let opts = HistogramOpts::new(name, name);
-        let histogram = HistogramVec::new(opts, label_keys).ok()?;
-        self.registry.register(Box::new(histogram.clone())).ok()?;
-        self.histograms.insert(name.to_string(), histogram.clone());
-        Some(histogram)
-    }
-    pub fn increment_counter(&self, name: &str, labels: &[(&str, &str)]) {
-        self.increment_counter_by(name, 1, labels);
+    pub fn observe_router_duration(&self, duration: f64) {
+        self.router_duration
+            .with_label_values(&[])
+            .observe(duration);
     }
 
-    pub fn increment_counter_by(&self, name: &str, value: u64, labels: &[(&str, &str)]) {
-        let label_keys: Vec<&str> = labels.iter().map(|(k, _)| *k).collect();
-        let label_values: Vec<&str> = labels.iter().map(|(_, v)| *v).collect();
-
-        if let Some(counter) = self.get_or_create_counter(name, &label_keys) {
-            if let Ok(m) = counter.get_metric_with_label_values(&label_values) {
-                m.inc_by(value);
-            }
-        }
+    pub fn observe_transformer_duration(&self, duration: f64, r#type: &str) {
+        self.transformer_duration
+            .with_label_values(&[r#type])
+            .observe(duration);
     }
 
-    pub fn set_gauge(&self, name: &str, value: f64, labels: &[(&str, &str)]) {
-        let label_keys: Vec<&str> = labels.iter().map(|(k, _)| *k).collect();
-        let label_values: Vec<&str> = labels.iter().map(|(_, v)| *v).collect();
-
-        if let Some(gauge) = self.get_or_create_gauge(name, &label_keys) {
-            if let Ok(m) = gauge.get_metric_with_label_values(&label_values) {
-                m.set(value);
-            }
-        }
+    pub fn inc_requests_total(&self, status: &str) {
+        self.requests_total.with_label_values(&[status]).inc();
     }
 
-    pub fn increment_gauge(&self, name: &str, labels: &[(&str, &str)]) {
-        let label_keys: Vec<&str> = labels.iter().map(|(k, _)| *k).collect();
-        let label_values: Vec<&str> = labels.iter().map(|(_, v)| *v).collect();
-
-        if let Some(gauge) = self.get_or_create_gauge(name, &label_keys) {
-            if let Ok(m) = gauge.get_metric_with_label_values(&label_values) {
-                m.inc();
-            }
-        }
+    pub fn observe_request_duration(&self, duration: f64, r#type: &str) {
+        self.request_duration
+            .with_label_values(&[r#type])
+            .observe(duration);
     }
 
-    pub fn decrement_gauge(&self, name: &str, labels: &[(&str, &str)]) {
-        let label_keys: Vec<&str> = labels.iter().map(|(k, _)| *k).collect();
-        let label_values: Vec<&str> = labels.iter().map(|(_, v)| *v).collect();
-
-        if let Some(gauge) = self.get_or_create_gauge(name, &label_keys) {
-            if let Ok(m) = gauge.get_metric_with_label_values(&label_values) {
-                m.dec();
-            }
-        }
-    }
-
-    pub fn observe_histogram(&self, name: &str, value: f64, labels: &[(&str, &str)]) {
-        let label_keys: Vec<&str> = labels.iter().map(|(k, _)| *k).collect();
-        let label_values: Vec<&str> = labels.iter().map(|(_, v)| *v).collect();
-
-        if let Some(histogram) = self.get_or_create_histogram(name, &label_keys) {
-            if let Ok(m) = histogram.get_metric_with_label_values(&label_values) {
-                m.observe(value);
-            }
-        }
+    pub fn observe_ws_extension_duration(&self, duration: f64, direction: &str) {
+        self.ws_extension_duration
+            .with_label_values(&[direction])
+            .observe(duration);
     }
 }
 
@@ -218,5 +240,59 @@ impl ProxyHttp for PrometheusProxy {
             pingora::ErrorType::HTTPStatus(404),
             "Not Found",
         ))
+    }
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::server::context::AppCtx;
+    use pingora::server::Server;
+
+    #[test]
+    fn test_prometheus_backend_initialization() {
+        let backend = PrometheusBackend::new();
+        backend.init_metrics().unwrap();
+
+        // Verify pre-initialized metrics can be reached
+        backend.heartbeat.with_label_values(&[]).set(1.0);
+        backend.inc_active_connections();
+        backend.dec_active_connections();
+        backend.observe_router_duration(0.1);
+        backend.observe_transformer_duration(0.05, "request");
+        backend.inc_requests_total("200");
+        backend.observe_request_duration(0.2, "total");
+        backend.observe_ws_extension_duration(0.01, "upstream");
+
+        let encoded = backend.encode();
+        assert!(encoded.contains(METRIC_HEARTBEAT));
+        assert!(encoded.contains(METRIC_ACTIVE_CONNECTIONS));
+        assert!(encoded.contains(METRIC_ROUTER_DURATION));
+        assert!(encoded.contains(METRIC_TRANSFORMER_DURATION));
+        assert!(encoded.contains(METRIC_REQUESTS_TOTAL));
+        assert!(encoded.contains(METRIC_REQUEST_DURATION));
+        assert!(encoded.contains(METRIC_WS_EXTENSION_DURATION));
+        assert!(encoded.contains("status=\"200\""));
+        assert!(encoded.contains("type=\"request\""));
+        assert!(encoded.contains("type=\"total\""));
+        assert!(encoded.contains("direction=\"upstream\""));
+    }
+
+    #[test]
+    fn test_metrics_extension_init() {
+        let mut server = Server::new(None).unwrap();
+        let mut app_ctx = AppCtx::new();
+
+        let mut config = WhooshConfig::default();
+        config.metrics_listen = Some("127.0.0.1:9091".to_string());
+        app_ctx.insert(config);
+
+        let extension = MetricsExtension;
+        extension.whoosh_init(&mut server, &mut app_ctx).unwrap();
+
+        let backend = app_ctx.get::<PrometheusBackend>().unwrap();
+        let encoded = backend.encode();
+        assert!(encoded.contains(METRIC_HEARTBEAT));
+        // Check heartbeat value
+        assert!(encoded.contains(&format!("{} 1", METRIC_HEARTBEAT)));
     }
 }

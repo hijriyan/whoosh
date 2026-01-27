@@ -232,7 +232,7 @@ impl ProxyHttp for WhooshProxy {
         ctx: &mut Self::CTX,
     ) -> Result<bool, Box<Error>> {
         if let Some(metrics) = &self.metrics {
-            metrics.increment_gauge("whoosh_active_connections", &[]);
+            metrics.inc_active_connections();
         }
 
         // Fast path: check filters first
@@ -271,11 +271,7 @@ impl ProxyHttp for WhooshProxy {
         let match_result = self.router.match_request(req_header);
 
         if let Some(metrics) = &self.metrics {
-            metrics.observe_histogram(
-                "whoosh_router_duration_seconds",
-                route_start.elapsed().as_secs_f64(),
-                &[],
-            );
+            metrics.observe_router_duration(route_start.elapsed().as_secs_f64());
         }
 
         if let Some(match_result) = match_result {
@@ -286,10 +282,9 @@ impl ProxyHttp for WhooshProxy {
                 transformer.transform_request(req_header);
 
                 if let Some(metrics) = &self.metrics {
-                    metrics.observe_histogram(
-                        "whoosh_transformer_duration_seconds",
+                    metrics.observe_transformer_duration(
                         transform_start.elapsed().as_secs_f64(),
-                        &[("type", "request")],
+                        "request",
                     );
                 }
             }
@@ -401,10 +396,9 @@ impl ProxyHttp for WhooshProxy {
             transformer.transform_response(upstream_response);
 
             if let Some(metrics) = &self.metrics {
-                metrics.observe_histogram(
-                    "whoosh_transformer_duration_seconds",
+                metrics.observe_transformer_duration(
                     transform_start.elapsed().as_secs_f64(),
-                    &[("type", "response")],
+                    "response",
                 );
             }
         }
@@ -595,29 +589,22 @@ impl ProxyHttp for WhooshProxy {
 
     async fn logging(&self, session: &mut Session, _e: Option<&Error>, ctx: &mut Self::CTX) {
         if let Some(metrics) = &self.metrics {
-            metrics.decrement_gauge("whoosh_active_connections", &[]);
+            metrics.dec_active_connections();
 
             let status = session
                 .response_written()
                 .map(|resp| resp.status.as_u16().to_string())
                 .unwrap_or_else(|| "0".to_string());
 
-            metrics.increment_counter("whoosh_requests_total", &[("status", &status)]);
+            metrics.inc_requests_total(&status);
 
             // Record total latency
-            metrics.observe_histogram(
-                "whoosh_request_duration_seconds",
-                ctx.start_time.elapsed().as_secs_f64(),
-                &[("type", "total")],
-            );
+            metrics.observe_request_duration(ctx.start_time.elapsed().as_secs_f64(), "total");
 
             // Record upstream latency if applicable
             if let Some(upstream_start) = ctx.upstream_start_time {
-                metrics.observe_histogram(
-                    "whoosh_request_duration_seconds",
-                    upstream_start.elapsed().as_secs_f64(),
-                    &[("type", "upstream")],
-                );
+                metrics
+                    .observe_request_duration(upstream_start.elapsed().as_secs_f64(), "upstream");
             }
         }
     }
@@ -686,11 +673,7 @@ fn apply_ws_extensions(
             WebsocketDirection::UpstreamToDownstream => "downstream",
             WebsocketDirection::DownstreamToUpstream => "upstream",
         };
-        metrics.observe_histogram(
-            "whoosh_websocket_extension_duration_seconds",
-            start.elapsed().as_secs_f64(),
-            &[("direction", direction_label)],
-        );
+        metrics.observe_ws_extension_duration(start.elapsed().as_secs_f64(), direction_label);
     }
 
     action

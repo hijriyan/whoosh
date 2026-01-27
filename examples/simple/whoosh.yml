@@ -1,5 +1,6 @@
 whoosh:
   http_listen: "[::]:2023"
+  metrics_listen: "[::]:9090"
 
   upstreams:
     - name: fastapi
