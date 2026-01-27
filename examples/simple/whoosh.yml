@@ -1,0 +1,18 @@
+whoosh:
+  http_listen: "[::]:2023"
+
+  upstreams:
+    - name: fastapi
+      servers:
+        - host: 127.0.0.1:8000
+
+  services:
+    - name: fastapi_service
+      host: fastapi
+      protocols:
+        - http
+        - ws
+      routes:
+        - name: fastapi_router
+          rules:
+            - rule: "PathPrefix(`/`)"

@@ -1,0 +1,59 @@
+x-peer-options: &peer_options
+  read_timeout: 30 # in seconds
+  idle_timeout: null # in seconds
+  write_timeout: 30 # in seconds
+  verify_cert: true
+  verify_hostname: true
+  tcp_recv_buf: 4096 # in bytes
+  curves: null
+  tcp_fast_open: true
+
+x-ssl-settings: &ssl_settings
+  cacert: null
+  server_cert: null
+  server_key: null
+  ssl_min_version: "TLS1.2"
+  ssl_max_version: "TLS1.3"
+  cipher_suites:
+    tls12: null
+    tls13: null
+
+x-acme-settings: &acme_settings
+  ca_server: "https://acme-staging-v02.api.letsencrypt.org/directory"
+  email: "admin@example.com"
+  storage: "letsencrypt/acme.json"
+  challenge: "http-01" # http-01 or tls-alpn-01
+
+whoosh:
+  http_listen: "[::]:2023"
+  https_listen: "[::]:1823"
+  ssl: *ssl_settings
+  acme: *acme_settings
+
+  metrics_listen: "[::]:9090"
+
+  upstreams:
+    - name: "ups_searchengine"
+      peer_options: *peer_options
+      servers:
+        - host: google.com:443
+          weight: 50
+          peer_options:
+            <<: *peer_options
+            sni: "google.com"
+        - host: duckduckgo.com:443
+          weight: 100
+          peer_options:
+            <<: *peer_options
+
+  services:
+    - name: "se_service"
+      host: "ups_searchengine"
+      protocols:
+        - "http"
+        - "https"
+      routes:
+        - name: "se_router"
+          rules:
+            - rule: "PathPrefix(`/`)"
+              priority: 100

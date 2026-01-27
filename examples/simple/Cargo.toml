@@ -1,0 +1,15 @@
+[package]
+name = "simple"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+log = "0.4.29"
+whoosh = { version = "0.1.0-alpha.0", path = "../.." }
+
+[profile.release]
+strip = true
+opt-level = "z"
+lto = true
+codegen-units = 1
+panic = "abort"
