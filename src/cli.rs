@@ -19,9 +19,13 @@ pub fn whoosh_main(
 
     log::info!("Loading configuration from {}", config_path);
 
-    let builder = ConfigBuilder::new()
-        .from_file(config_path)
-        .expect("Failed to load configuration file");
+    let builder = match ConfigBuilder::new().from_file(config_path) {
+        Ok(b) => b,
+        Err(e) => {
+            log::error!("Failed to load configuration file: {}", e);
+            std::process::exit(1);
+        }
+    };
 
     let config = builder.build();
     let app = App::new(config.clone(), extensions, websocket_extensions);
