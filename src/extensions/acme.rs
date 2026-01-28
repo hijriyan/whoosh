@@ -71,13 +71,30 @@ impl AcmeManager {
             return AcmeStorage::default();
         }
 
-        if let Ok(file) = File::open(path) {
-            let reader = BufReader::new(file);
-            if let Ok(storage) = serde_json::from_reader(reader) {
-                return storage;
+        match File::open(path) {
+            Ok(file) => {
+                let reader = BufReader::new(file);
+                match serde_json::from_reader(reader) {
+                    Ok(storage) => storage,
+                    Err(e) => {
+                        log::warn!(
+                            "Failed to parse ACME storage from {}: {}. Using default.",
+                            path.display(),
+                            e
+                        );
+                        AcmeStorage::default()
+                    }
+                }
+            }
+            Err(e) => {
+                log::warn!(
+                    "Failed to open ACME storage at {}: {}. Using default.",
+                    path.display(),
+                    e
+                );
+                AcmeStorage::default()
             }
         }
-        AcmeStorage::default()
     }
 
     fn load_storage(&self) -> AcmeStorage {
@@ -91,10 +108,28 @@ impl AcmeManager {
         // Write to disk
         let path = Path::new(&self.settings.storage);
         if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent)?;
+            fs::create_dir_all(parent).map_err(|e| {
+                WhooshError::Acme(format!(
+                    "Failed to create directory: {} (error {})",
+                    parent.display(),
+                    e
+                ))
+            })?;
         }
-        let file = File::create(path)?;
-        serde_json::to_writer_pretty(file, storage)?;
+        let file = File::create(path).map_err(|e| {
+            WhooshError::Acme(format!(
+                "Failed to create file: {} (error {})",
+                path.display(),
+                e
+            ))
+        })?;
+        serde_json::to_writer_pretty(file, storage).map_err(|e| {
+            WhooshError::Acme(format!(
+                "Failed to write to file: {} (error {})",
+                path.display(),
+                e
+            ))
+        })?;
         Ok(())
     }
 
