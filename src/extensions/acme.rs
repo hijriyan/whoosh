@@ -198,6 +198,30 @@ impl AcmeManager {
         self.load_storage().certificates
     }
 
+    /// Add a certificate to the in-memory cache store.
+    /// This makes the certificate immediately available for SNI lookups.
+    fn add_to_cert_store(
+        &self,
+        domain: String,
+        cert_pem: &str,
+        key_pem: &str,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let certs = X509::stack_from_pem(cert_pem.as_bytes())?;
+        let key = PKey::private_key_from_pem(key_pem.as_bytes())?;
+
+        let parsed = Arc::new(ParsedCertificate {
+            certificate_chain: certs,
+            private_key: key,
+        });
+
+        let mut cache = (**self.cert_cache.load()).clone();
+        cache.insert(domain.clone(), parsed);
+        self.cert_cache.store(Arc::new(cache));
+        log::debug!("Added certificate for {} to cache store", domain);
+
+        Ok(())
+    }
+
     /// Save multiple certificates to the persistent storage in a single operation.
     pub fn save_certificates_batch(
         &self,
@@ -314,6 +338,15 @@ impl AcmeManager {
 
                 match self.generate_tls_alpn_certificate(&domain, &key_auth_str) {
                     Ok((cert_pem, key_pem)) => {
+                        // Add TLS-ALPN challenge cert to cache immediately for handshake
+                        if let Err(e) = self.add_to_cert_store(domain.clone(), &cert_pem, &key_pem)
+                        {
+                            log::warn!(
+                                "Failed to add TLS-ALPN cert for {} to cache: {}",
+                                domain,
+                                e
+                            );
+                        }
                         self.tls_alpn_challenges
                             .insert(domain.clone(), (cert_pem, key_pem));
                         domains_to_cleanup.push(domain.clone());
@@ -373,23 +406,13 @@ impl AcmeManager {
 
         // Add to cache immediately after obtaining certificate
         if let Some(first_domain) = domains.first() {
-            // Parse and cache the certificate
-            if let (Ok(certs), Ok(key)) = (
-                X509::stack_from_pem(cert_pem.as_bytes()),
-                PKey::private_key_from_pem(private_key_pem.as_bytes()),
-            ) {
-                let parsed = Arc::new(ParsedCertificate {
-                    certificate_chain: certs,
-                    private_key: key,
-                });
-                let mut cache = (**self.cert_cache.load()).clone();
-                cache.insert(first_domain.clone(), parsed);
-                self.cert_cache.store(Arc::new(cache));
-                log::debug!("Added certificate for {} to cache", first_domain);
-            } else {
+            if let Err(e) =
+                self.add_to_cert_store(first_domain.clone(), &cert_pem, &private_key_pem)
+            {
                 log::warn!(
-                    "Failed to parse certificate for {} for caching",
-                    first_domain
+                    "Failed to add certificate for {} to cache: {}",
+                    first_domain,
+                    e
                 );
             }
         }

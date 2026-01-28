@@ -178,33 +178,13 @@ impl WhooshExtension for HttpsExtension {
 
             // Configure ALPN
             if use_acme_tls_alpn {
-                let acme_manager_for_alpn = acme_manager.clone();
                 ssl_acceptor.set_alpn_select_callback(move |ssl_ref, client_protos| {
+                    // Check if client is requesting ACME TLS-ALPN-01 challenge
                     if client_protos.windows(10).any(|w| w == b"acme-tls/1") {
-                        if let Some(name) = ssl_ref
-                            .servername(NameType::HOST_NAME)
-                            .map(|v| v.to_string())
-                        {
-                            if let Some(acme_manager) = acme_manager_for_alpn.as_ref() {
-                                if let Some((cert_pem, key_pem)) =
-                                    acme_manager.get_tls_alpn_challenge(&name)
-                                {
-                                    if let (Ok(cert), Ok(key)) = (
-                                        X509::from_pem(cert_pem.as_bytes()),
-                                        PKey::private_key_from_pem(key_pem.as_bytes()),
-                                    ) {
-                                        if ssl_ref.set_certificate(&cert).is_ok()
-                                            && ssl_ref.set_private_key(&key).is_ok()
-                                        {
-                                            log::info!(
-                                                "Serving TLS-ALPN-01 challenge certificate for {}",
-                                                name
-                                            );
-                                            return Ok(b"acme-tls/1");
-                                        }
-                                    }
-                                }
-                            }
+                        if let Some(name) = ssl_ref.servername(NameType::HOST_NAME) {
+                            log::info!("ACME TLS-ALPN-01 challenge request for {}", name);
+                            // SNI callback will serve the challenge cert from cache
+                            return Ok(b"acme-tls/1");
                         }
                     }
 
