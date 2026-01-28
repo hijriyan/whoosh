@@ -370,8 +370,30 @@ impl AcmeManager {
             challenge.set_ready().await?;
         }
 
-        // Wait for order to be ready
-        let state = order.poll_ready(&RetryPolicy::default()).await?;
+        // Wait for order to be ready with retries
+        let max_retries = 5;
+        let mut state = OrderStatus::Pending;
+
+        for attempt in 1..=max_retries {
+            state = order.poll_ready(&RetryPolicy::default()).await?;
+
+            if state == OrderStatus::Ready {
+                break;
+            }
+
+            if attempt < max_retries {
+                let delay_secs = 2u64.pow(attempt - 1); // Exponential backoff: 1, 2, 4, 8 seconds
+                log::info!(
+                    "Order not ready (status: {:?}), retrying in {} seconds (attempt {}/{})",
+                    state,
+                    delay_secs,
+                    attempt,
+                    max_retries
+                );
+                tokio::time::sleep(tokio::time::Duration::from_secs(delay_secs)).await;
+            }
+        }
+
         if state != OrderStatus::Ready {
             // Cleanup on failure
             for t in tokens_to_cleanup {
@@ -380,7 +402,7 @@ impl AcmeManager {
             for domain in domains_to_cleanup {
                 self.tls_alpn_challenges.remove(&domain);
             }
-            return Err(format!("Order failed: {:?}", state).into());
+            return Err(format!("Order failed after {} retries: {:?}", max_retries, state).into());
         }
 
         // 4. Finalize Order
