@@ -185,7 +185,7 @@ impl WhooshExtension for HttpsExtension {
                         if let Some(name) = ssl_ref.servername(NameType::HOST_NAME) {
                             // Only accept acme-tls/1 if we have the challenge cert in cache
                             if let Some(am) = acme_manager_for_alpn.as_ref() {
-                                if am.get_certificate_cached(name).is_some() {
+                                if am.get_certificate_cached(name, true).is_some() {
                                     log::info!("ACME TLS-ALPN-01 challenge request for {}", name);
                                     return Ok(b"acme-tls/1");
                                 } else {
@@ -201,18 +201,8 @@ impl WhooshExtension for HttpsExtension {
                     // Fallback to standard protocols if offered
                     if client_protos.windows(2).any(|w| w == b"h2") {
                         Ok(b"h2")
-                    } else if client_protos.windows(8).any(|w| w == b"http/1.1") {
-                        Ok(b"http/1.1")
                     } else {
-                        // If h2/http.1.1 not found and it was an acme request, it will fail ALPN negotiation correctly
-                        // by returning the first protocol or NOACK.
-                        if let Some(first_len) = client_protos.first().copied() {
-                            let first_len = first_len as usize;
-                            if first_len + 1 <= client_protos.len() {
-                                return Ok(&client_protos[1..first_len + 1]);
-                            }
-                        }
-                        Err(openssl::ssl::AlpnError::NOACK)
+                        Ok(b"http/1.1")
                     }
                 });
             } else {
@@ -236,7 +226,7 @@ impl WhooshExtension for HttpsExtension {
                 {
                     log::debug!("SNI callback for hostname: {}", name);
                     if let Some(am) = acme_manager_for_sni.as_ref() {
-                        if let Some(cached) = am.get_certificate_cached(&name) {
+                        if let Some(cached) = am.get_certificate_cached(&name, use_acme_tls_alpn) {
                             log::debug!("Serving certificate from cache for {}", name);
                             if let Some(leaf) = cached.certificate_chain.first() {
                                 if ssl_ref.set_certificate(leaf).is_ok()
