@@ -256,7 +256,13 @@ impl AcmeManager {
 
         // 4. Finalize Order
         // Generate CSR
-        let params = CertificateParams::new(domains.clone())?;
+        let mut params = CertificateParams::new(domains.clone())?;
+        params.distinguished_name.remove(rcgen::DnType::CommonName);
+        if let Some(first_domain) = domains.first() {
+            params
+                .distinguished_name
+                .push(rcgen::DnType::CommonName, first_domain.clone());
+        }
         // rcgen generates a key pair automatically
         let key_pair = rcgen::KeyPair::generate()?;
         let csr = params.serialize_request(&key_pair)?;
@@ -303,6 +309,10 @@ impl AcmeManager {
 
         // Create certificate parameters
         let mut params = rcgen::CertificateParams::new(vec![domain.to_string()])?;
+        params.distinguished_name.remove(rcgen::DnType::CommonName);
+        params
+            .distinguished_name
+            .push(rcgen::DnType::CommonName, domain.to_string());
 
         // For TLS-ALPN-01, we need to add the ACME identifier extension
         // The extension contains a hash of the key authorization

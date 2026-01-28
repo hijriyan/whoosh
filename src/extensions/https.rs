@@ -39,9 +39,19 @@ impl HttpsExtension {
             .clone()
             .filter(|sans| !sans.is_empty())
             .unwrap_or_else(|| vec!["localhost".to_string(), "127.0.0.1".to_string()]);
-        let cert = rcgen::generate_simple_self_signed(subject_alt_names).ok()?;
-        let priv_key_pem = cert.signing_key.serialize_pem();
-        let cert_pem = cert.cert.pem();
+
+        // Custom cert parameters for self-signed
+        let mut params = rcgen::CertificateParams::new(subject_alt_names).ok()?;
+        params.distinguished_name.remove(rcgen::DnType::CommonName);
+        params
+            .distinguished_name
+            .push(rcgen::DnType::CommonName, "Whoosh Gateway");
+
+        let key_pair = rcgen::KeyPair::generate().ok()?;
+        let cert = params.self_signed(&key_pair).ok()?;
+
+        let priv_key_pem = key_pair.serialize_pem();
+        let cert_pem = cert.pem();
         let key = PKey::private_key_from_pem(priv_key_pem.as_bytes()).ok()?;
         let cert = X509::from_pem(cert_pem.as_bytes()).ok()?;
         Some((cert, key))
@@ -103,18 +113,6 @@ impl WhooshExtension for HttpsExtension {
         // Services are already added by App from UpstreamManager
 
         if let Some(ssl) = &config.ssl {
-            let use_acme_tls_alpn = acme_manager.is_some()
-                && config
-                    .acme
-                    .as_ref()
-                    .map(|acme| {
-                        matches!(
-                            acme.challenge,
-                            crate::config::models::AcmeChallengeType::TlsAlpn01
-                        )
-                    })
-                    .unwrap_or(false);
-
             let mut ssl_acceptor = match SslAcceptor::mozilla_intermediate(SslMethod::tls()) {
                 Ok(acceptor) => acceptor,
                 Err(e) => {
@@ -137,7 +135,7 @@ impl WhooshExtension for HttpsExtension {
                 match Self::load_pem_pair_from_files(cert_path, key_path) {
                     Ok(pair) => Some(pair),
                     Err(e) => {
-                        log::error!("Failed to load TLS certs: {}", e);
+                        log::error!("Failed to load TLS certs from config: {}", e);
                         None
                     }
                 }
@@ -156,109 +154,98 @@ impl WhooshExtension for HttpsExtension {
                 }
             };
 
-            if let Some((cert, key)) = base_pair.as_ref() {
+            // Set initial certificate on the acceptor
+            if let Some((cert, key)) = fallback_pair.as_ref() {
                 if let Err(e) = ssl_acceptor.set_private_key(key) {
-                    log::error!("Failed to set configured private key: {}", e);
-                    return Err(WhooshError::Tls(format!(
-                        "Failed to set configured private key: {}",
-                        e
-                    )));
+                    log::error!("Failed to set base private key: {}", e);
                 }
                 if let Err(e) = ssl_acceptor.set_certificate(cert) {
-                    log::error!("Failed to set configured certificate: {}", e);
-                    return Err(WhooshError::Tls(format!(
-                        "Failed to set configured certificate: {}",
-                        e
-                    )));
+                    log::error!("Failed to set base certificate: {}", e);
                 }
-            } else if use_acme_tls_alpn {
-                if let Some((cert, key)) = fallback_pair.as_ref() {
-                    if let Err(e) = ssl_acceptor.set_private_key(key) {
-                        log::error!("Failed to set fallback private key: {}", e);
-                        return Err(WhooshError::Tls(format!(
-                            "Failed to set fallback private key: {}",
-                            e
-                        )));
-                    }
-                    if let Err(e) = ssl_acceptor.set_certificate(cert) {
-                        log::error!("Failed to set fallback certificate: {}", e);
-                        return Err(WhooshError::Tls(format!(
-                            "Failed to set fallback certificate: {}",
-                            e
-                        )));
-                    }
-                } else {
-                    log::error!("Failed to generate self-signed certificate");
-                    return Err(WhooshError::Tls(
-                        "Failed to generate self-signed certificate".to_string(),
-                    ));
-                }
+            }
+
+            let use_acme_tls_alpn = acme_manager.is_some()
+                && config
+                    .acme
+                    .as_ref()
+                    .map(|acme| {
+                        matches!(
+                            acme.challenge,
+                            crate::config::models::AcmeChallengeType::TlsAlpn01
+                        )
+                    })
+                    .unwrap_or(false);
+
+            // Configure ALPN
+            if use_acme_tls_alpn {
                 let acme_manager_for_alpn = acme_manager.clone();
                 ssl_acceptor.set_alpn_select_callback(move |ssl_ref, client_protos| {
                     if client_protos.windows(10).any(|w| w == b"acme-tls/1") {
-                        let handled = (|| {
-                            let acme_manager = acme_manager_for_alpn.as_ref()?;
-                            let name = ssl_ref
-                                .servername(NameType::HOST_NAME)
-                                .map(|v| v.to_string())?;
-                            let (cert_pem, key_pem) = acme_manager.get_tls_alpn_challenge(&name)?;
-
-                            let cert = X509::from_pem(cert_pem.as_bytes()).ok()?;
-                            let key = PKey::private_key_from_pem(key_pem.as_bytes()).ok()?;
-
-                            if ssl_ref.set_certificate(&cert).is_ok()
-                                && ssl_ref.set_private_key(&key).is_ok()
-                            {
-                                Some(())
-                            } else {
-                                None
+                        if let Some(name) = ssl_ref
+                            .servername(NameType::HOST_NAME)
+                            .map(|v| v.to_string())
+                        {
+                            if let Some(acme_manager) = acme_manager_for_alpn.as_ref() {
+                                if let Some((cert_pem, key_pem)) =
+                                    acme_manager.get_tls_alpn_challenge(&name)
+                                {
+                                    if let (Ok(cert), Ok(key)) = (
+                                        X509::from_pem(cert_pem.as_bytes()),
+                                        PKey::private_key_from_pem(key_pem.as_bytes()),
+                                    ) {
+                                        if ssl_ref.set_certificate(&cert).is_ok()
+                                            && ssl_ref.set_private_key(&key).is_ok()
+                                        {
+                                            log::info!(
+                                                "Serving TLS-ALPN-01 challenge certificate for {}",
+                                                name
+                                            );
+                                            return Ok(b"acme-tls/1");
+                                        }
+                                    }
+                                }
                             }
-                        })();
-
-                        if handled.is_some() {
-                            return Ok(b"acme-tls/1");
                         }
                     }
+
+                    // Fallback to standard protocols if offered
+                    if client_protos.windows(2).any(|w| w == b"h2") {
+                        Ok(b"h2")
+                    } else if client_protos.windows(8).any(|w| w == b"http/1.1") {
+                        Ok(b"http/1.1")
+                    } else {
+                        // If h2/http.1.1 not found and it was an acme request, it will fail ALPN negotiation correctly
+                        // by returning the first protocol or NOACK.
+                        if let Some(first_len) = client_protos.first().copied() {
+                            let first_len = first_len as usize;
+                            if first_len + 1 <= client_protos.len() {
+                                return Ok(&client_protos[1..first_len + 1]);
+                            }
+                        }
+                        Err(openssl::ssl::AlpnError::NOACK)
+                    }
+                });
+            } else {
+                ssl_acceptor.set_alpn_select_callback(|_, client_protos| {
                     if client_protos.windows(2).any(|w| w == b"h2") {
                         Ok(b"h2")
                     } else {
                         Ok(b"http/1.1")
                     }
                 });
-            } else {
-                log::info!(
-                    "SSL certificates not found or invalid. Using self-signed fallback certificate..."
-                );
-                if let Some((cert, key)) = fallback_pair.as_ref() {
-                    if let Err(e) = ssl_acceptor.set_private_key(key) {
-                        log::error!("Failed to set fallback private key: {}", e);
-                        return Err(WhooshError::Tls(format!(
-                            "Failed to set fallback private key: {}",
-                            e
-                        )));
-                    }
-                    if let Err(e) = ssl_acceptor.set_certificate(cert) {
-                        log::error!("Failed to set fallback certificate: {}", e);
-                        return Err(WhooshError::Tls(format!(
-                            "Failed to set fallback certificate: {}",
-                            e
-                        )));
-                    }
-                } else {
-                    log::error!("Failed to generate self-signed certificate");
-                    return Err(WhooshError::Tls(
-                        "Failed to generate self-signed certificate".to_string(),
-                    ));
-                }
             }
 
-            if let Some(acme_manager) = acme_manager.clone() {
-                ssl_acceptor.set_servername_callback(move |ssl_ref, _alert| {
-                    if let Some(name) = ssl_ref
-                        .servername(NameType::HOST_NAME)
-                        .map(|value| value.to_string())
-                    {
-                        if let Some(entry) = acme_manager.load_certificate(&name) {
+            // Configure SNI callback (always if acme is enabled to handle SNI-based cert loading)
+            let acme_manager_for_sni = acme_manager.clone();
+            let fallback_pair_for_sni = fallback_pair.clone();
+
+            ssl_acceptor.set_servername_callback(move |ssl_ref, _alert| {
+                if let Some(name) = ssl_ref
+                    .servername(NameType::HOST_NAME)
+                    .map(|value| value.to_string())
+                {
+                    if let Some(am) = acme_manager_for_sni.as_ref() {
+                        if let Some(entry) = am.load_certificate(&name) {
                             if let (Ok(cert), Ok(key)) = (
                                 X509::from_pem(entry.certificate.as_bytes()),
                                 PKey::private_key_from_pem(entry.private_key.as_bytes()),
@@ -267,24 +254,19 @@ impl WhooshExtension for HttpsExtension {
                                     && ssl_ref.set_private_key(&key).is_ok()
                                 {
                                     return Ok(());
-                                } else {
-                                    log::warn!("Failed to set SNI certificate for {}", name);
                                 }
-                            } else {
-                                log::warn!("Failed to parse SNI certificate for {}", name);
                             }
                         }
                     }
-                    if let Some((cert, key)) = fallback_pair.as_ref() {
-                        let failed = ssl_ref.set_certificate(cert).is_err()
-                            || ssl_ref.set_private_key(key).is_err();
-                        if failed {
-                            log::warn!("Failed to apply fallback certificate");
-                        }
-                    }
-                    Ok(())
-                });
-            }
+                }
+
+                // Fallback cert if SNI matched nothing
+                if let Some((cert, key)) = fallback_pair_for_sni.as_ref() {
+                    let _ = ssl_ref.set_certificate(cert);
+                    let _ = ssl_ref.set_private_key(key);
+                }
+                Ok(())
+            });
 
             if let Some(ver) = ssl.ssl_min_version.as_deref().and_then(parse_ssl_version) {
                 if let Err(e) = ssl_acceptor.set_min_proto_version(Some(ver)) {
