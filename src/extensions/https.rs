@@ -244,15 +244,21 @@ impl WhooshExtension for HttpsExtension {
                     .servername(NameType::HOST_NAME)
                     .map(|value| value.to_string())
                 {
+                    log::debug!("SNI callback for hostname: {}", name);
                     if let Some(am) = acme_manager_for_sni.as_ref() {
-                        if let Some(entry) = am.load_certificate(&name) {
-                            if let (Ok(cert), Ok(key)) = (
-                                X509::from_pem(entry.certificate.as_bytes()),
-                                PKey::private_key_from_pem(entry.private_key.as_bytes()),
-                            ) {
-                                if ssl_ref.set_certificate(&cert).is_ok()
-                                    && ssl_ref.set_private_key(&key).is_ok()
+                        if let Some(cached) = am.get_certificate_cached(&name) {
+                            log::debug!("Serving certificate from cache for {}", name);
+                            if let Some(leaf) = cached.certificate_chain.first() {
+                                if ssl_ref.set_certificate(leaf).is_ok()
+                                    && ssl_ref.set_private_key(&cached.private_key).is_ok()
                                 {
+                                    for intermediate in cached.certificate_chain.iter().skip(1) {
+                                        let _ = ssl_ref.add_chain_cert(intermediate.clone());
+                                    }
+                                    log::info!(
+                                        "Successfully applied ACME certificate (cached) for {}",
+                                        name
+                                    );
                                     return Ok(());
                                 }
                             }

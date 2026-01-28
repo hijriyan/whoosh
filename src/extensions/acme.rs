@@ -1,9 +1,13 @@
 use crate::config::models::{AcmeChallengeType, AcmeSettings};
+use crate::error::WhooshError;
+use arc_swap::ArcSwap;
 use dashmap::DashMap;
 use instant_acme::{
     Account, AccountCredentials, AuthorizationStatus, ChallengeType, Identifier, NewAccount,
     NewOrder, OrderStatus, RetryPolicy,
 };
+use openssl::pkey::{PKey, Private};
+use openssl::x509::X509;
 use rcgen::CertificateParams;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -11,6 +15,11 @@ use std::fs::{self, File};
 use std::io::BufReader;
 use std::path::Path;
 use std::sync::Arc;
+
+pub struct ParsedCertificate {
+    pub certificate_chain: Vec<X509>,
+    pub private_key: PKey<Private>,
+}
 
 #[derive(Serialize, Deserialize, Default, Clone)]
 struct AcmeStorage {
@@ -35,6 +44,8 @@ pub struct AcmeManager {
     tls_alpn_challenges: Arc<DashMap<String, (String, String)>>,
     // Cache of the persistent storage
     storage: Arc<RwLock<AcmeStorage>>,
+    // In-memory cache of parsed certificates for SNI performance
+    cert_cache: ArcSwap<HashMap<String, Arc<ParsedCertificate>>>,
 }
 
 impl AcmeManager {
@@ -44,11 +55,56 @@ impl AcmeManager {
             challenges: Arc::new(DashMap::new()),
             tls_alpn_challenges: Arc::new(DashMap::new()),
             storage: Arc::new(RwLock::new(AcmeStorage::default())),
+            cert_cache: ArcSwap::from_pointee(HashMap::new()),
         };
         // Load storage into cache
         let storage = manager.read_storage_from_disk();
         *manager.storage.write().unwrap() = storage;
+
+        // Hydrate the certificate cache
+        manager.hydrate_cache();
+
         manager
+    }
+
+    /// Update the in-memory certificate cache by parsing all certificates from storage.
+    fn hydrate_cache(&self) {
+        let storage = self.load_storage();
+        let mut new_cache = HashMap::new();
+
+        for (domain, entry) in &storage.certificates {
+            let certs = X509::stack_from_pem(entry.certificate.as_bytes());
+            let key = PKey::private_key_from_pem(entry.private_key.as_bytes());
+
+            match (certs, key) {
+                (Ok(certs), Ok(key)) => {
+                    new_cache.insert(
+                        domain.clone(),
+                        Arc::new(ParsedCertificate {
+                            certificate_chain: certs,
+                            private_key: key,
+                        }),
+                    );
+                }
+                (Err(e), _) => {
+                    log::warn!("Failed to pre-parse ACME certificate for {}: {}", domain, e)
+                }
+                (_, Err(e)) => {
+                    log::warn!("Failed to pre-parse ACME private key for {}: {}", domain, e)
+                }
+            }
+        }
+
+        self.cert_cache.store(Arc::new(new_cache));
+        log::debug!(
+            "Certificate cache hydrated with {} entries",
+            storage.certificates.len()
+        );
+    }
+
+    /// Retrieve a parsed certificate from the in-memory cache.
+    pub fn get_certificate_cached(&self, domain: &str) -> Option<Arc<ParsedCertificate>> {
+        self.cert_cache.load().get(domain).cloned()
     }
 
     /// Retrieve the key authorization for a given token.
@@ -142,20 +198,25 @@ impl AcmeManager {
         self.load_storage().certificates
     }
 
-    fn save_certificate(
+    /// Save multiple certificates to the persistent storage in a single operation.
+    pub fn save_certificates_batch(
         &self,
-        domain: String,
-        cert: String,
-        key: String,
+        certs: Vec<(String, String, String)>,
     ) -> Result<(), Box<dyn std::error::Error>> {
+        if certs.is_empty() {
+            return Ok(());
+        }
+
         let mut storage = self.load_storage();
-        storage.certificates.insert(
-            domain,
-            CertificateEntry {
-                certificate: cert,
-                private_key: key,
-            },
-        );
+        for (domain, cert, key) in &certs {
+            storage.certificates.insert(
+                domain.clone(),
+                CertificateEntry {
+                    certificate: cert.clone(),
+                    private_key: key.clone(),
+                },
+            );
+        }
         self.save_storage(&storage)
     }
 
@@ -310,14 +371,27 @@ impl AcmeManager {
         let cert_pem = order.poll_certificate(&RetryPolicy::default()).await?;
         log::info!("Certificate received");
 
-        // Save certificate
+        // Add to cache immediately after obtaining certificate
         if let Some(first_domain) = domains.first() {
-            self.save_certificate(
-                first_domain.clone(),
-                cert_pem.clone(),
-                private_key_pem.clone(),
-            )
-            .unwrap_or_else(|e| log::error!("Failed to save certificate: {}", e));
+            // Parse and cache the certificate
+            if let (Ok(certs), Ok(key)) = (
+                X509::stack_from_pem(cert_pem.as_bytes()),
+                PKey::private_key_from_pem(private_key_pem.as_bytes()),
+            ) {
+                let parsed = Arc::new(ParsedCertificate {
+                    certificate_chain: certs,
+                    private_key: key,
+                });
+                let mut cache = (**self.cert_cache.load()).clone();
+                cache.insert(first_domain.clone(), parsed);
+                self.cert_cache.store(Arc::new(cache));
+                log::debug!("Added certificate for {} to cache", first_domain);
+            } else {
+                log::warn!(
+                    "Failed to parse certificate for {} for caching",
+                    first_domain
+                );
+            }
         }
 
         // Cleanup challenges
@@ -429,8 +503,6 @@ impl WhooshFilter for AcmeFilter {
     }
 }
 
-use crate::error::WhooshError;
-
 #[async_trait]
 impl WhooshExtension for AcmeExtension {
     fn whoosh_init(&self, server: &mut Server, app_ctx: &mut AppCtx) -> Result<(), WhooshError> {
@@ -460,7 +532,7 @@ impl BackgroundService for AcmeRenewalService {
         loop {
             tokio::select! {
                 _ = interval.tick() => {
-                    self.renew_certificates().await;
+                    self.renew_certificates(&mut shutdown).await;
                 }
                 _ = shutdown.changed() => {
                     break;
@@ -471,52 +543,86 @@ impl BackgroundService for AcmeRenewalService {
 }
 
 impl AcmeRenewalService {
-    async fn renew_certificates(&self) {
+    async fn renew_certificates(&self, shutdown: &mut ShutdownWatch) {
         log::info!("Checking for certificate renewals...");
         let certificates = self.acme.list_certificates();
         let registered_hosts = get_registered_hosts();
+
+        // Use a vector to collect certificates to save in batch
+        let mut new_certs = Vec::new();
+
+        // 1. Check for missing certificates
         for host in registered_hosts {
+            if *shutdown.borrow() {
+                log::info!("Shutdown detected during missing certificate check. Aborting...");
+                break;
+            }
+
             if !certificates.contains_key(&host) {
-                if let Err(e) = self.acme.request_certificate(vec![host.clone()]).await {
-                    log::error!("Failed to request certificate for {}: {}", host, e);
-                } else {
-                    log::info!("Successfully requested certificate for {}", host);
+                match self.acme.request_certificate(vec![host.clone()]).await {
+                    Ok((cert, key)) => {
+                        log::info!("Successfully requested certificate for {}", host);
+                        new_certs.push((host, cert, key));
+                    }
+                    Err(e) => {
+                        log::error!("Failed to request certificate for {}: {}", host, e);
+                    }
                 }
             }
         }
 
-        for (domain, entry) in certificates {
-            let Ok((cert, _bytes_read)) =
-                Pem::read(std::io::Cursor::new(entry.certificate.as_bytes()))
-            else {
-                continue;
-            };
-
-            if let Ok((_, x509)) = x509_parser::parse_x509_certificate(&cert.contents) {
-                let not_after = x509.validity().not_after;
-                let now = x509_parser::time::ASN1Time::now();
-
-                // Renew if expiring in less than 30 days
-                let days_remaining = (not_after.timestamp() - now.timestamp()) / 86400;
-
-                if days_remaining < 30 {
-                    log::info!(
-                        "Certificate for {} is expiring in {} days. Renewing...",
-                        domain,
-                        days_remaining
-                    );
-                    if let Err(e) = self.acme.request_certificate(vec![domain.clone()]).await {
-                        log::error!("Failed to renew certificate for {}: {}", domain, e);
-                    } else {
-                        log::info!("Successfully renewed certificate for {}", domain);
-                    }
-                } else {
-                    log::debug!(
-                        "Certificate for {} is valid for {} days",
-                        domain,
-                        days_remaining
-                    );
+        // 2. Check for expiring certificates
+        if !*shutdown.borrow() {
+            for (domain, entry) in certificates {
+                if *shutdown.borrow() {
+                    log::info!("Shutdown detected during renewal check. Aborting...");
+                    break;
                 }
+
+                let Ok((cert, _bytes_read)) =
+                    Pem::read(std::io::Cursor::new(entry.certificate.as_bytes()))
+                else {
+                    continue;
+                };
+
+                if let Ok((_, x509)) = x509_parser::parse_x509_certificate(&cert.contents) {
+                    let not_after = x509.validity().not_after;
+                    let now = x509_parser::time::ASN1Time::now();
+
+                    // Renew if expiring in less than 30 days
+                    let days_remaining = (not_after.timestamp() - now.timestamp()) / 86400;
+
+                    if days_remaining < 30 {
+                        log::info!(
+                            "Certificate for {} is expiring in {} days. Renewing...",
+                            domain,
+                            days_remaining
+                        );
+                        match self.acme.request_certificate(vec![domain.clone()]).await {
+                            Ok((cert, key)) => {
+                                log::info!("Successfully renewed certificate for {}", domain);
+                                new_certs.push((domain, cert, key));
+                            }
+                            Err(e) => {
+                                log::error!("Failed to renew certificate for {}: {}", domain, e);
+                            }
+                        }
+                    } else {
+                        log::debug!(
+                            "Certificate for {} is valid for {} days",
+                            domain,
+                            days_remaining
+                        );
+                    }
+                }
+            }
+        }
+
+        // 3. Batch save all new/renewed certificates
+        if !new_certs.is_empty() {
+            log::info!("Saving {} certificates in batch", new_certs.len());
+            if let Err(e) = self.acme.save_certificates_batch(new_certs) {
+                log::error!("Failed to save certificates in batch: {}", e);
             }
         }
     }
