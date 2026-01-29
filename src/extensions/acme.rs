@@ -492,6 +492,11 @@ impl AcmeManager {
 
         // Create the ACME identifier extension using rcgen's built-in method
         let acme_extension = rcgen::CustomExtension::new_acme_identifier(&key_auth_hash);
+        log::debug!(
+            "ACME extension OID: {:?}, critical: {}",
+            acme_extension.oid_components().collect::<Vec<_>>(),
+            acme_extension.criticality()
+        );
         params.custom_extensions.push(acme_extension);
 
         // Generate the certificate

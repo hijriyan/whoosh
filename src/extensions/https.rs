@@ -181,12 +181,16 @@ impl WhooshExtension for HttpsExtension {
                 let acme_manager_for_alpn = acme_manager.clone();
                 ssl_acceptor.set_alpn_select_callback(move |ssl_ref, client_protos| {
                     // Check if client is requesting ACME TLS-ALPN-01 challenge
-                    if client_protos.windows(10).any(|w| w == b"acme-tls/1") {
+                    log::debug!("Client offered ALPN protocols: {:?}", client_protos);
+                    if client_protos
+                        .windows(11)
+                        .any(|w| w[0] == 0x0a && &w[1..] == b"acme-tls/1")
+                    {
                         if let Some(name) = ssl_ref.servername(NameType::HOST_NAME) {
                             // Only accept acme-tls/1 if we have the challenge cert in cache
                             if let Some(am) = acme_manager_for_alpn.as_ref() {
                                 if am.get_certificate_cached(name, true).is_some() {
-                                    log::info!("ACME TLS-ALPN-01 challenge request for {}", name);
+                                    log::debug!("ACME TLS-ALPN-01 challenge request for {}", name);
                                     return Ok(b"acme-tls/1");
                                 } else {
                                     log::warn!(
