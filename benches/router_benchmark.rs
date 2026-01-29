@@ -1,22 +1,29 @@
-use criterion::{criterion_group, criterion_main, Criterion};
-use std::hint::black_box;
+use criterion::{Criterion, criterion_group, criterion_main};
 use pingora::http::RequestHeader;
-use whoosh::router::{parse_rule, Matcher, register_router_rule};
-use nom::{IResult, bytes::complete::tag, character::complete::{multispace0, char}};
+use std::hint::black_box;
+use whoosh::router::{Matcher, parse_rule, register_router_rule};
+use winnow::Parser;
+use winnow::ascii::multispace0;
+use winnow::token::literal as tag;
 
 // Custom matcher for benchmark
 #[derive(Debug)]
 struct BenchmarkMatcher;
 impl Matcher for BenchmarkMatcher {
-    fn matches(&self, _req: &RequestHeader) -> bool { true }
+    fn matches(&self, _req: &RequestHeader) -> bool {
+        true
+    }
 }
 
-fn parse_benchmark_rule(input: &str) -> IResult<&str, Box<dyn Matcher>> {
-    let (input, _) = tag("BenchmarkRule")(input)?;
-    let (input, _) = multispace0(input)?;
-    let (input, _) = char('(')(input)?;
-    let (input, _) = char(')')(input)?;
-    Ok((input, Box::new(BenchmarkMatcher)))
+fn parse_benchmark_rule(
+    input: &mut &str,
+) -> std::result::Result<Box<dyn Matcher>, winnow::error::ContextError> {
+    (tag("BenchmarkRule"), multispace0, '(', ')')
+        .map(|_| Box::new(BenchmarkMatcher) as Box<dyn Matcher>)
+        .parse_next(input)
+        .map_err(|e: winnow::error::ErrMode<winnow::error::ContextError>| {
+            e.into_inner().unwrap_or_default()
+        })
 }
 
 fn router_benchmark(c: &mut Criterion) {
@@ -31,7 +38,11 @@ fn router_benchmark(c: &mut Criterion) {
     });
 
     c.bench_function("parse_complex_rule", |b| {
-        b.iter(|| parse_rule(black_box("(Host(`example.com`) && PathPrefix(`/api`)) || Method(`GET`)")))
+        b.iter(|| {
+            parse_rule(black_box(
+                "(Host(`example.com`) && PathPrefix(`/api`)) || Method(`GET`)",
+            ))
+        })
     });
 
     // 2. Benchmark Matching
@@ -40,7 +51,8 @@ fn router_benchmark(c: &mut Criterion) {
         b.iter(|| simple_rule.matches(black_box(&req)))
     });
 
-    let complex_rule = parse_rule("(Host(`example.com`) && PathPrefix(`/api`)) || Method(`POST`)").unwrap();
+    let complex_rule =
+        parse_rule("(Host(`example.com`) && PathPrefix(`/api`)) || Method(`POST`)").unwrap();
     c.bench_function("match_complex_rule", |b| {
         b.iter(|| complex_rule.matches(black_box(&req)))
     });

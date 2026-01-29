@@ -92,7 +92,7 @@ impl ConfigBuilder {
     /// use whoosh::config::ConfigBuilder;
     ///
     /// let builder = ConfigBuilder::new();
-    /// builder.configure(|cfg| {
+    /// builder.configure(|cfg, _server_conf| {
     ///     cfg.http_listen = "0.0.0.0:8080".to_string();
     /// });
     /// ```

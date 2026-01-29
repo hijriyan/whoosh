@@ -3,23 +3,23 @@ pub mod parser;
 pub mod registry;
 
 pub use models::{RequestTransformer, ResponseTransformer};
-pub use parser::{parse_transformers, parse_response_transformers};
+pub use parser::{parse_response_transformers, parse_transformers};
 pub use registry::{
+    parse_custom_request_transformers, parse_custom_response_transformers,
     register_request_transformer, register_response_transformer,
-    parse_custom_request_transformers, parse_custom_response_transformers
 };
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_transformers, parse_response_transformers};
-    use pingora::http::{RequestHeader, ResponseHeader};
+    use super::{parse_response_transformers, parse_transformers};
     use crate::transformer::models::{RequestTransformer, ResponseTransformer};
-    use crate::transformer::registry::{register_request_transformer, register_response_transformer};
-    use nom::{
-        bytes::complete::tag,
-        character::complete::{char, multispace0},
-        IResult,
+    use crate::transformer::registry::{
+        register_request_transformer, register_response_transformer,
     };
+    use pingora::http::{RequestHeader, ResponseHeader};
+    use winnow::ascii::multispace0;
+    use winnow::token::literal as tag;
+    use winnow::{Parser, Result};
 
     #[test]
     fn test_request_transformer_parsing_and_execution() {
@@ -29,7 +29,7 @@ mod tests {
 
         // Test multiple transformers separated by semicolon
         let script = "ReplaceHeader(`Host`, `new-host`) ; DeleteHeader(`X-Old`) ; AppendHeader(`X-New`, `value`)";
-        let (_, transformer) = parse_transformers(script).unwrap();
+        let transformer = parse_transformers(script).unwrap();
 
         transformer.transform_request(&mut req);
 
@@ -46,7 +46,7 @@ mod tests {
 
         // Test multiple transformers separated by semicolon
         let script = "ReplaceHeader(`Server`, `new-server`) ; DeleteHeader(`X-Old`) ; AppendHeader(`X-New`, `value`)";
-        let (_, transformer) = parse_response_transformers(script).unwrap();
+        let transformer = parse_response_transformers(script).unwrap();
 
         transformer.transform_response(&mut res);
 
@@ -59,10 +59,11 @@ mod tests {
     fn test_query_transformer() {
         // Initial request with query params
         let mut req = RequestHeader::build("GET", b"/path?foo=bar&baz=qux", None).unwrap();
-        
+
         // Script to modify query params
-        let script = "ReplaceQuery(`foo`, `updated`) ; DeleteQuery(`baz`) ; AppendQuery(`new`, `param`)";
-        let (_, transformer) = parse_transformers(script).unwrap();
+        let script =
+            "ReplaceQuery(`foo`, `updated`) ; DeleteQuery(`baz`) ; AppendQuery(`new`, `param`)";
+        let transformer = parse_transformers(script).unwrap();
 
         transformer.transform_request(&mut req);
 
@@ -94,20 +95,16 @@ mod tests {
     #[test]
     fn test_custom_transformer_registry() {
         // Define custom parsers
-        fn parse_my_req_transformer(input: &str) -> IResult<&str, Box<dyn RequestTransformer>> {
-            let (input, _) = tag("MyReqTransformer")(input)?;
-            let (input, _) = multispace0(input)?;
-            let (input, _) = char('(')(input)?;
-            let (input, _) = char(')')(input)?;
-            Ok((input, Box::new(CustomRequestTransformer)))
+        fn parse_my_req_transformer(input: &mut &str) -> Result<Box<dyn RequestTransformer>> {
+            (tag("MyReqTransformer"), multispace0, '(', ')')
+                .map(|_| Box::new(CustomRequestTransformer) as Box<dyn RequestTransformer>)
+                .parse_next(input)
         }
 
-        fn parse_my_res_transformer(input: &str) -> IResult<&str, Box<dyn ResponseTransformer>> {
-            let (input, _) = tag("MyResTransformer")(input)?;
-            let (input, _) = multispace0(input)?;
-            let (input, _) = char('(')(input)?;
-            let (input, _) = char(')')(input)?;
-            Ok((input, Box::new(CustomResponseTransformer)))
+        fn parse_my_res_transformer(input: &mut &str) -> Result<Box<dyn ResponseTransformer>> {
+            (tag("MyResTransformer"), multispace0, '(', ')')
+                .map(|_| Box::new(CustomResponseTransformer) as Box<dyn ResponseTransformer>)
+                .parse_next(input)
         }
 
         // Register them
@@ -116,14 +113,14 @@ mod tests {
 
         // Parse and test request transformer
         let script_req = "MyReqTransformer()";
-        let (_, transformer_req) = parse_transformers(script_req).unwrap();
+        let transformer_req = parse_transformers(script_req).unwrap();
         let mut req = RequestHeader::build("GET", b"/", None).unwrap();
         transformer_req.transform_request(&mut req);
         assert_eq!(req.headers.get("X-Custom-Req").unwrap(), "true");
 
         // Parse and test response transformer
         let script_res = "MyResTransformer()";
-        let (_, transformer_res) = parse_response_transformers(script_res).unwrap();
+        let transformer_res = parse_response_transformers(script_res).unwrap();
         let mut res = ResponseHeader::build(200, None).unwrap();
         transformer_res.transform_response(&mut res);
         assert_eq!(res.headers.get("X-Custom-Res").unwrap(), "true");

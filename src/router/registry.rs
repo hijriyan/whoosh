@@ -1,13 +1,15 @@
-use nom::IResult;
 use crate::router::matcher::Matcher;
-use std::collections::HashSet;
-use std::sync::{Arc, OnceLock, Mutex};
 use arc_swap::ArcSwap;
-use tldextract_rs::{TLDExtract, SuffixList, Source};
+use std::collections::HashSet;
+use std::sync::{Arc, Mutex, OnceLock};
+use tldextract_rs::{Source, SuffixList, TLDExtract};
 
 // Define the type for a rule parser factory
-// Use Arc instead of Box to allow cloning the Vec for ArcSwap (COW)
-pub type RouterRuleParser = Arc<dyn Fn(&str) -> IResult<&str, Box<dyn Matcher>> + Send + Sync>;
+pub type RouterRuleParser = Arc<
+    dyn Fn(&mut &str) -> std::result::Result<Box<dyn Matcher>, winnow::error::ContextError>
+        + Send
+        + Sync,
+>;
 
 // Global registry for custom router rules using ArcSwap for lock-free reads
 static ROUTER_REGISTRY: OnceLock<ArcSwap<Vec<RouterRuleParser>>> = OnceLock::new();
@@ -34,7 +36,10 @@ fn get_tld_extractor() -> &'static Mutex<TLDExtract> {
 /// Register a custom router rule parser
 pub fn register_router_rule<F>(parser: F)
 where
-    F: Fn(&str) -> IResult<&str, Box<dyn Matcher>> + Send + Sync + 'static,
+    F: Fn(&mut &str) -> std::result::Result<Box<dyn Matcher>, winnow::error::ContextError>
+        + Send
+        + Sync
+        + 'static,
 {
     let registry = get_registry();
     let parser = Arc::new(parser);
@@ -47,20 +52,32 @@ where
 }
 
 /// Try to parse input using registered custom rules
-pub fn parse_custom_rules(input: &str) -> IResult<&str, Box<dyn Matcher>> {
+pub fn parse_custom_rules(
+    input: &mut &str,
+) -> std::result::Result<Box<dyn Matcher>, winnow::error::ContextError> {
     let registry = get_registry();
     let parsers = registry.load();
-    
+
+    let mut last_err = None;
     // Iterate through registered parsers and return the first match
     for parser in parsers.iter() {
-        if let Ok((remaining, matcher)) = parser(input) {
-            return Ok((remaining, matcher));
+        let mut temp_input = *input;
+        match parser(&mut temp_input) {
+            Ok(matcher) => {
+                *input = temp_input;
+                return Ok(matcher);
+            }
+            Err(e) => {
+                last_err = Some(e);
+            }
         }
     }
-    
-    // If no custom parser matches, return error
-    // We use ErrorKind::Tag as a generic "no match" error
-    Err(nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::Tag)))
+
+    if let Some(err) = last_err {
+        Err(err)
+    } else {
+        Err(winnow::error::ContextError::default())
+    }
 }
 
 pub fn register_hosts<I>(hosts: I)
@@ -68,7 +85,7 @@ where
     I: IntoIterator<Item = String>,
 {
     let mut extractor = get_tld_extractor().lock().unwrap();
-    
+
     let mut incoming: Vec<String> = Vec::new();
     for host in hosts {
         if host.is_empty() {
@@ -76,8 +93,16 @@ where
         }
         match extractor.extract(&host) {
             Ok(extracted) => {
-                let has_domain = extracted.domain.as_ref().map(|s| !s.is_empty()).unwrap_or(false);
-                let has_suffix = extracted.suffix.as_ref().map(|s| !s.is_empty()).unwrap_or(false);
+                let has_domain = extracted
+                    .domain
+                    .as_ref()
+                    .map(|s| !s.is_empty())
+                    .unwrap_or(false);
+                let has_suffix = extracted
+                    .suffix
+                    .as_ref()
+                    .map(|s| !s.is_empty())
+                    .unwrap_or(false);
                 if has_domain && has_suffix {
                     incoming.push(host);
                 } else {
@@ -85,15 +110,19 @@ where
                 }
             }
             Err(e) => {
-                log::warn!("Skipping invalid host '{}' - TLD extraction failed: {}", host, e);
+                log::warn!(
+                    "Skipping invalid host '{}' - TLD extraction failed: {}",
+                    host,
+                    e
+                );
             }
         }
     }
-    
+
     if incoming.is_empty() {
         return;
     }
-    
+
     let registry = get_host_registry();
     registry.rcu(move |old| {
         let mut set: HashSet<String> = old.iter().cloned().collect();
@@ -112,11 +141,14 @@ pub fn get_registered_hosts() -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{register_hosts, get_registered_hosts};
+    use super::{get_registered_hosts, register_hosts};
 
     #[test]
     fn host_registry_collects_hosts() {
-        register_hosts(vec!["a.example.com".to_string(), "b.example.com".to_string()]);
+        register_hosts(vec![
+            "a.example.com".to_string(),
+            "b.example.com".to_string(),
+        ]);
         let hosts = get_registered_hosts();
         assert!(hosts.contains(&"a.example.com".to_string()));
         assert!(hosts.contains(&"b.example.com".to_string()));

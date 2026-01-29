@@ -1,8 +1,10 @@
-use criterion::{criterion_group, criterion_main, Criterion};
-use std::hint::black_box;
+use criterion::{Criterion, criterion_group, criterion_main};
 use pingora::http::RequestHeader;
-use whoosh::transformer::{parse_transformers, RequestTransformer, register_request_transformer};
-use nom::{IResult, bytes::complete::tag, character::complete::{multispace0, char}};
+use std::hint::black_box;
+use whoosh::transformer::{RequestTransformer, parse_transformers, register_request_transformer};
+use winnow::Parser;
+use winnow::ascii::multispace0;
+use winnow::token::literal as tag;
 
 // Custom transformer for benchmark
 #[derive(Debug)]
@@ -13,12 +15,15 @@ impl RequestTransformer for BenchmarkTransformer {
     }
 }
 
-fn parse_benchmark_transformer(input: &str) -> IResult<&str, Box<dyn RequestTransformer>> {
-    let (input, _) = tag("BenchmarkTransformer")(input)?;
-    let (input, _) = multispace0(input)?;
-    let (input, _) = char('(')(input)?;
-    let (input, _) = char(')')(input)?;
-    Ok((input, Box::new(BenchmarkTransformer)))
+fn parse_benchmark_transformer(
+    input: &mut &str,
+) -> std::result::Result<Box<dyn RequestTransformer>, winnow::error::ContextError> {
+    (tag("BenchmarkTransformer"), multispace0, '(', ')')
+        .map(|_| Box::new(BenchmarkTransformer) as Box<dyn RequestTransformer>)
+        .parse_next(input)
+        .map_err(|e: winnow::error::ErrMode<winnow::error::ContextError>| {
+            e.into_inner().unwrap_or_default()
+        })
 }
 
 fn transformer_benchmark(c: &mut Criterion) {
@@ -35,10 +40,10 @@ fn transformer_benchmark(c: &mut Criterion) {
     // Setup request for each iteration to simulate real world usage (cloning overhead included but necessary to keep state clean)
     // Actually for Criterion, we can modify the same request if the transformer is idempotent or we reset it.
     // But `AppendQuery` keeps adding. So we should clone.
-    
+
     let req_template = RequestHeader::build("GET", b"/api/v1/users?id=123", None).unwrap();
-    
-    let (_, simple_transformer) = parse_transformers("ReplaceHeader(`Host`, `new.com`)").unwrap();
+
+    let simple_transformer = parse_transformers("ReplaceHeader(`Host`, `new.com`)").unwrap();
     c.bench_function("transform_header_replace", |b| {
         b.iter(|| {
             let mut req = req_template.clone();
@@ -46,7 +51,7 @@ fn transformer_benchmark(c: &mut Criterion) {
         })
     });
 
-    let (_, query_transformer) = parse_transformers("ReplaceQuery(`id`, `456`)").unwrap();
+    let query_transformer = parse_transformers("ReplaceQuery(`id`, `456`)").unwrap();
     c.bench_function("transform_query_replace", |b| {
         b.iter(|| {
             let mut req = req_template.clone();
@@ -56,7 +61,7 @@ fn transformer_benchmark(c: &mut Criterion) {
 
     // 3. Benchmark Custom Transformer
     register_request_transformer(parse_benchmark_transformer);
-    let (_, custom_transformer) = parse_transformers("BenchmarkTransformer()").unwrap();
+    let custom_transformer = parse_transformers("BenchmarkTransformer()").unwrap();
     c.bench_function("transform_custom", |b| {
         b.iter(|| {
             let mut req = req_template.clone();

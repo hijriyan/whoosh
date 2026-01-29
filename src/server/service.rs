@@ -50,35 +50,36 @@ impl ServiceManager {
     }
 
     fn compile_services(config: &WhooshConfig) -> Vec<RuntimeService> {
-        let mut services = Vec::new();
+        use crate::router::registry::register_hosts;
 
-        for svc_config in &config.services {
-            let mut routes = Vec::new();
+        // Sequential service compilation
+        let services: Vec<RuntimeService> = config
+            .services
+            .iter()
+            .map(|svc_config| {
+                let mut routes = Vec::new();
 
-            for route_config in &svc_config.routes {
-                for rule_config in &route_config.rules {
-                    // Parse Matcher
-                    let matcher = match parse_rule(&rule_config.rule) {
-                        Ok(m) => m,
-                        Err(e) => {
-                            log::error!(
-                                "Rule parse error [service={}, route={}, rule={}]: {}",
-                                svc_config.name,
-                                route_config.name,
-                                rule_config.rule,
-                                e
-                            );
-                            continue;
-                        }
-                    };
+                for route_config in &svc_config.routes {
+                    for rule_config in &route_config.rules {
+                        // Parse Matcher
+                        let matcher = match parse_rule(&rule_config.rule) {
+                            Ok(m) => m,
+                            Err(e) => {
+                                log::error!(
+                                    "Rule parse error [service={}, route={}, rule={}]: {}",
+                                    svc_config.name,
+                                    route_config.name,
+                                    rule_config.rule,
+                                    e
+                                );
+                                continue;
+                            }
+                        };
 
-                    // Parse Request Transformer
-                    let req_transformer =
-                        rule_config
-                            .request_transformer
-                            .as_ref()
-                            .and_then(|t_str| match parse_transformers(t_str) {
-                                Ok((_, t)) => Some(Arc::from(t)),
+                        // Parse Request Transformer
+                        let req_transformer = rule_config.request_transformer.as_ref().and_then(
+                            |t_str| match parse_transformers(t_str) {
+                                Ok(t) => Some(Arc::from(t)),
                                 Err(e) => {
                                     log::error!(
                                     "Request transformer parse error [service={}, route={}, transformer={}]: {}",
@@ -89,15 +90,13 @@ impl ServiceManager {
                                 );
                                     None
                                 }
-                            });
+                            },
+                        );
 
-                    // Parse Response Transformer
-                    let res_transformer =
-                        rule_config
-                            .response_transformer
-                            .as_ref()
-                            .and_then(|t_str| match parse_response_transformers(t_str) {
-                                Ok((_, t)) => Some(Arc::from(t)),
+                        // Parse Response Transformer
+                        let res_transformer = rule_config.response_transformer.as_ref().and_then(
+                            |t_str| match parse_response_transformers(t_str) {
+                                Ok(t) => Some(Arc::from(t)),
                                 Err(e) => {
                                     log::error!(
                                     "Response transformer parse error [service={}, route={}, transformer={}]: {}",
@@ -108,27 +107,40 @@ impl ServiceManager {
                                 );
                                     None
                                 }
-                            });
+                            },
+                        );
 
-                    routes.push(RuntimeRoute {
-                        matcher,
-                        priority: rule_config.priority.unwrap_or(0),
-                        req_transformer,
-                        res_transformer,
-                    });
+                        routes.push(RuntimeRoute {
+                            matcher,
+                            priority: rule_config.priority.unwrap_or(0),
+                            req_transformer,
+                            res_transformer,
+                        });
+                    }
+                }
+
+                // Sort routes by priority (descending)
+                routes.sort_by(|a, b| b.priority.cmp(&a.priority));
+
+                RuntimeService {
+                    name: svc_config.name.clone(),
+                    host: svc_config.host.clone(),
+                    protocols: svc_config.protocols.clone(),
+                    routes,
+                }
+            })
+            .collect();
+
+        // Batch register all hosts for ACME (performance optimization)
+        let mut all_hosts = std::collections::HashSet::new();
+        for svc in &services {
+            for route in &svc.routes {
+                for host in route.matcher.get_hosts() {
+                    all_hosts.insert(host);
                 }
             }
-
-            // Sort routes by priority (descending)
-            routes.sort_by(|a, b| b.priority.cmp(&a.priority));
-
-            services.push(RuntimeService {
-                name: svc_config.name.clone(),
-                host: svc_config.host.clone(),
-                protocols: svc_config.protocols.clone(),
-                routes,
-            });
         }
+        register_hosts(all_hosts);
 
         services
     }

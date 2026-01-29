@@ -4,19 +4,17 @@ pub mod registry;
 
 pub use matcher::Matcher;
 pub use parser::parse_rule;
-pub use registry::{register_router_rule, parse_custom_rules};
+pub use registry::{parse_custom_rules, register_router_rule};
 
 #[cfg(test)]
 mod tests {
     use super::parse_rule;
-    use pingora::http::RequestHeader;
     use crate::router::matcher::Matcher;
     use crate::router::registry::register_router_rule;
-    use nom::{
-        bytes::complete::tag,
-        character::complete::{char, multispace0},
-        IResult,
-    };
+    use pingora::http::RequestHeader;
+    use winnow::ascii::multispace0;
+    use winnow::token::literal as tag;
+    use winnow::{Parser, Result};
 
     #[test]
     fn test_rule_parsing_and_matching() {
@@ -44,7 +42,8 @@ mod tests {
         assert!(rule.matches(&req));
 
         // 5. Nested Logic
-        let rule = parse_rule("(Host(`example.com`) && Path(`/foo`)) || PathPrefix(`/api`)").unwrap();
+        let rule =
+            parse_rule("(Host(`example.com`) && Path(`/foo`)) || PathPrefix(`/api`)").unwrap();
         assert!(rule.matches(&req));
     }
 
@@ -87,12 +86,10 @@ mod tests {
     #[test]
     fn test_custom_rule_registry() {
         // Define a custom parser
-        fn parse_my_rule(input: &str) -> IResult<&str, Box<dyn Matcher>> {
-            let (input, _) = tag("MyRule")(input)?;
-            let (input, _) = multispace0(input)?;
-            let (input, _) = char('(')(input)?;
-            let (input, _) = char(')')(input)?;
-            Ok((input, Box::new(CustomMatcher)))
+        fn parse_my_rule(input: &mut &str) -> Result<Box<dyn Matcher>> {
+            (tag("MyRule"), multispace0, '(', ')')
+                .map(|_| Box::new(CustomMatcher) as Box<dyn Matcher>)
+                .parse_next(input)
         }
 
         // Register it
@@ -100,7 +97,7 @@ mod tests {
 
         // Parse it
         let rule = parse_rule("MyRule()").unwrap();
-        
+
         // Test it
         let req = RequestHeader::build("GET", b"/", None).unwrap();
         assert!(rule.matches(&req));
@@ -111,7 +108,11 @@ mod tests {
         // HeaderRegexp
         let rule = parse_rule("HeaderRegexp(`User-Agent`, `^Mozilla.*`)").unwrap();
         let mut req = RequestHeader::build("GET", b"/", None).unwrap();
-        req.insert_header("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)").unwrap();
+        req.insert_header(
+            "User-Agent",
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)",
+        )
+        .unwrap();
         assert!(rule.matches(&req));
 
         req.insert_header("User-Agent", "Curl/7.64.1").unwrap();
