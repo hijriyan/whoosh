@@ -129,9 +129,7 @@ where
         for host in &incoming {
             set.insert(host.clone());
         }
-        let mut next: Vec<String> = set.into_iter().collect();
-        next.sort();
-        next
+        set.into_iter().collect::<Vec<String>>()
     });
 }
 
