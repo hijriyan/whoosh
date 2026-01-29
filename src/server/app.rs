@@ -1,4 +1,4 @@
-use crate::config::models::WhooshConfig;
+use crate::config::models::{ServerConf, WhooshConfig};
 use crate::extensions::acme::{AcmeExtension, AcmeFilter};
 use crate::extensions::http::HttpExtension;
 use crate::extensions::https::HttpsExtension;
@@ -11,6 +11,7 @@ use std::sync::Arc;
 
 pub struct App {
     pub config: WhooshConfig,
+    pub server_conf: Option<ServerConf>,
     pub extensions: Vec<Box<dyn WhooshExtension>>,
     pub filters: Vec<Arc<dyn WhooshFilter>>,
     pub websocket_extensions: Vec<Arc<dyn WebsocketExtension>>,
@@ -20,11 +21,13 @@ pub struct App {
 impl App {
     pub fn new(
         config: WhooshConfig,
+        server_conf: Option<ServerConf>,
         custom_extensions: Vec<Box<dyn WhooshExtension>>,
         custom_websocket_extensions: Vec<Arc<dyn WebsocketExtension>>,
     ) -> Self {
         let mut app = Self {
             config,
+            server_conf,
             extensions: custom_extensions,
             filters: Vec::new(),
             websocket_extensions: custom_websocket_extensions,
@@ -66,8 +69,7 @@ impl App {
     }
 
     pub fn run(self) -> Result<(), crate::error::WhooshError> {
-        let mut server =
-            Server::new(None).map_err(|e| crate::error::WhooshError::Other(e.to_string()))?;
+        let mut server = Server::new_with_opt_and_conf(None, self.server_conf.unwrap_or_default());
         server.bootstrap();
         let mut app_ctx = self.app_ctx;
 

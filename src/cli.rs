@@ -27,8 +27,8 @@ pub fn whoosh_main(
         }
     };
 
-    let config = builder.build();
-    let app = App::new(config.clone(), extensions, websocket_extensions);
+    let (config, server_conf) = builder.build();
+    let app = App::new(config, server_conf, extensions, websocket_extensions);
     log::info!("Starting Whoosh server...");
     if let Err(e) = app.run() {
         log::error!("Fatal error: {}", e);

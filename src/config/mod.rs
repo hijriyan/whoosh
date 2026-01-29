@@ -16,7 +16,7 @@ mod tests {
         let builder = ConfigBuilder::new().from_file("whoosh.yml");
 
         assert!(builder.is_ok());
-        let config = builder.unwrap().build();
+        let (config, _) = builder.unwrap().build();
 
         assert_eq!(config.http_listen, "[::]:2023");
         assert!(config.ssl.is_some());
@@ -26,8 +26,8 @@ mod tests {
 
     #[test]
     fn test_builder_fluent_api() {
-        let config = ConfigBuilder::new()
-            .configure(|cfg| {
+        let (config, _) = ConfigBuilder::new()
+            .configure(|cfg, _| {
                 cfg.http_listen = "127.0.0.1:8080".to_string();
             })
             .build();
@@ -49,7 +49,7 @@ mod tests {
 
     impl ConfigBuilderExt for ConfigBuilder {
         fn with_grpc(self, settings: GrpcSettings) -> Self {
-            self.configure(|cfg| {
+            self.configure(|cfg, _| {
                 let val = serde_yaml::to_value(settings).unwrap();
                 cfg.extra.insert("grpc".to_string(), val);
             })
@@ -63,12 +63,23 @@ mod tests {
             port: 50051,
         };
 
-        let config = ConfigBuilder::new()
+        let (config, _) = ConfigBuilder::new()
             .with_grpc(grpc_settings) // This method didn't exist in original builder
             .build();
 
         assert!(config.extra.contains_key("grpc"));
         let val = config.extra.get("grpc").unwrap();
         assert_eq!(val["port"], 50051);
+    }
+
+    #[test]
+    fn test_configure_pingora() {
+        let (_, server_conf) = ConfigBuilder::new()
+            .configure(|_, sc| {
+                sc.threads = 8;
+            })
+            .build();
+
+        assert_eq!(server_conf.unwrap().threads, 8);
     }
 }

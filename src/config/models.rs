@@ -1,9 +1,11 @@
+pub use pingora::server::configuration::ServerConf;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct RootConfig {
     pub whoosh: WhooshConfig,
+    pub pingora: Option<ServerConf>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, Default)]

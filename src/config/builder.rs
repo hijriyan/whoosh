@@ -1,18 +1,27 @@
-use super::models::*;
+use super::models::{
+    AcmeSettings, RootConfig, ServerConf, Service, SslSettings, Upstream, WhooshConfig,
+};
 use serde_yaml;
 use std::fs::File;
 use std::io::BufReader;
 use std::path::Path;
 
-#[derive(Default)]
 pub struct ConfigBuilder {
     config: WhooshConfig,
+    server_conf: Option<ServerConf>,
+}
+
+impl Default for ConfigBuilder {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl ConfigBuilder {
     pub fn new() -> Self {
         ConfigBuilder {
             config: WhooshConfig::default(),
+            server_conf: Some(ServerConf::default()),
         }
     }
 
@@ -43,6 +52,9 @@ impl ConfigBuilder {
         })?;
 
         self.config = root.whoosh;
+        if root.pingora.is_some() {
+            self.server_conf = root.pingora;
+        }
         Ok(self)
     }
 
@@ -86,14 +98,16 @@ impl ConfigBuilder {
     /// ```
     pub fn configure<F>(mut self, func: F) -> Self
     where
-        F: FnOnce(&mut WhooshConfig),
+        F: FnOnce(&mut WhooshConfig, &mut ServerConf),
     {
-        func(&mut self.config);
+        if let Some(ref mut sc) = self.server_conf {
+            func(&mut self.config, sc);
+        }
         self
     }
 
-    pub fn build(self) -> WhooshConfig {
-        self.config
+    pub fn build(self) -> (WhooshConfig, Option<ServerConf>) {
+        (self.config, self.server_conf)
     }
 }
 
