@@ -36,6 +36,7 @@ pub struct CertificateEntry {
 
 use std::sync::RwLock;
 
+#[derive(Clone)]
 pub struct AcmeManager {
     settings: AcmeSettings,
     // Map of token -> key_authorization used for HTTP-01 challenge
@@ -45,7 +46,7 @@ pub struct AcmeManager {
     // Cache of the persistent storage
     storage: Arc<RwLock<AcmeStorage>>,
     // In-memory cache of parsed certificates for SNI performance
-    cert_cache: ArcSwap<HashMap<String, Arc<ParsedCertificate>>>,
+    cert_cache: Arc<ArcSwap<HashMap<String, Arc<ParsedCertificate>>>>,
 }
 
 impl AcmeManager {
@@ -55,7 +56,7 @@ impl AcmeManager {
             challenges: Arc::new(DashMap::new()),
             tls_alpn_challenges: Arc::new(DashMap::new()),
             storage: Arc::new(RwLock::new(AcmeStorage::default())),
-            cert_cache: ArcSwap::from_pointee(HashMap::new()),
+            cert_cache: Arc::new(ArcSwap::from_pointee(HashMap::new())),
         };
         // Load storage into cache
         let storage = manager.read_storage_from_disk();
@@ -582,7 +583,8 @@ impl WhooshExtension for AcmeExtension {
         server.add_service(bg_service);
 
         // Share AcmeManager with other extensions (e.g. HttpsExtension)
-        app_ctx.insert(self.acme_manager.clone());
+        // We clone the inner AcmeManager handle and insert it so get::<AcmeManager>() works
+        app_ctx.insert((*self.acme_manager).clone());
         Ok(())
     }
 }
@@ -674,5 +676,28 @@ impl AcmeRenewalService {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::server::context::AppCtx;
+
+    #[test]
+    fn test_app_ctx_acme_manager_retrieval() {
+        let settings = AcmeSettings {
+            storage: "/tmp/test_get.json".to_string(),
+            ..Default::default()
+        };
+        let manager = Arc::new(AcmeManager::new(&settings));
+        let ctx = AppCtx::new();
+
+        // This is what AcmeExtension::whoosh_init does
+        ctx.insert((*manager).clone());
+
+        // This is what HttpsExtension::whoosh_init does
+        let retrieved = ctx.get::<AcmeManager>();
+        assert!(retrieved.is_some());
     }
 }
