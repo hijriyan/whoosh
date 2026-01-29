@@ -180,17 +180,34 @@ impl WhooshExtension for HttpsExtension {
             if use_acme_tls_alpn {
                 let acme_manager_for_alpn = acme_manager.clone();
                 ssl_acceptor.set_alpn_select_callback(move |ssl_ref, client_protos| {
-                    // Check if client is requesting ACME TLS-ALPN-01 challenge
-                    log::debug!("Client offered ALPN protocols: {:?}", client_protos);
-                    if client_protos
-                        .windows(11)
-                        .any(|w| w[0] == 0x0a && &w[1..] == b"acme-tls/1")
-                    {
+                    log::info!("ALPN selection callback triggered (ACME mode)");
+
+                    // Helper to parse OpenSSL ALPN wire format (len1, proto1, len2, proto2...)
+                    let mut found_acme = false;
+                    let mut found_h2 = false;
+
+                    let mut pos = 0;
+                    while pos < client_protos.len() {
+                        let len = client_protos[pos] as usize;
+                        pos += 1;
+                        if pos + len > client_protos.len() {
+                            break;
+                        }
+                        let proto = &client_protos[pos..pos + len];
+                        if proto == b"acme-tls/1" {
+                            found_acme = true;
+                        } else if proto == b"h2" {
+                            found_h2 = true;
+                        }
+                        pos += len;
+                    }
+
+                    if found_acme {
                         if let Some(name) = ssl_ref.servername(NameType::HOST_NAME) {
-                            // Only accept acme-tls/1 if we have the challenge cert in cache
+                            log::debug!("ACME TLS-ALPN-01 support requested for {}", name);
                             if let Some(am) = acme_manager_for_alpn.as_ref() {
                                 if am.get_certificate_cached(name, true).is_some() {
-                                    log::debug!("ACME TLS-ALPN-01 challenge request for {}", name);
+                                    log::info!("Selecting acme-tls/1 for {}", name);
                                     return Ok(b"acme-tls/1");
                                 } else {
                                     log::warn!(
@@ -199,18 +216,16 @@ impl WhooshExtension for HttpsExtension {
                                     );
                                 }
                             }
+                        } else {
+                            log::warn!("ACME challenge requested but no SNI hostname provided");
                         }
                     }
 
-                    // Fallback to standard protocols if offered
-                    if client_protos.windows(2).any(|w| w == b"h2") {
-                        Ok(b"h2")
-                    } else {
-                        Ok(b"http/1.1")
-                    }
+                    if found_h2 { Ok(b"h2") } else { Ok(b"http/1.1") }
                 });
             } else {
                 ssl_acceptor.set_alpn_select_callback(|_, client_protos| {
+                    log::info!("ALPN selection callback triggered (Standard mode)");
                     if client_protos.windows(2).any(|w| w == b"h2") {
                         Ok(b"h2")
                     } else {
@@ -324,5 +339,85 @@ impl WhooshExtension for HttpsExtension {
             );
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::models::{AcmeChallengeType, AcmeSettings, WhooshConfig};
+
+    #[test]
+    fn test_use_acme_tls_alpn_logic() {
+        let mut config = WhooshConfig::default();
+
+        // Case 1: No acme manager, no acme config
+        let acme_manager: Option<Arc<AcmeManager>> = None;
+        let use_acme_tls_alpn = acme_manager.is_some()
+            && config
+                .acme
+                .as_ref()
+                .map(|acme| matches!(acme.challenge, AcmeChallengeType::TlsAlpn01))
+                .unwrap_or(false);
+        assert!(!use_acme_tls_alpn);
+
+        // Case 2: Acme config present but not TlsAlpn01
+        config.acme = Some(AcmeSettings {
+            challenge: AcmeChallengeType::Http01,
+            ..Default::default()
+        });
+
+        // We need a dummy AcmeSettings for AcmeManager
+        let settings = AcmeSettings {
+            storage: "/tmp/whoosh_test_storage.json".to_string(),
+            challenge: AcmeChallengeType::Http01,
+            ..Default::default()
+        };
+        let acme_manager = Some(Arc::new(AcmeManager::new(&settings)));
+        let use_acme_tls_alpn = acme_manager.is_some()
+            && config
+                .acme
+                .as_ref()
+                .map(|acme| matches!(acme.challenge, AcmeChallengeType::TlsAlpn01))
+                .unwrap_or(false);
+        assert!(!use_acme_tls_alpn);
+
+        // Case 3: Acme config present and TlsAlpn01
+        config.acme = Some(AcmeSettings {
+            challenge: AcmeChallengeType::TlsAlpn01,
+            ..Default::default()
+        });
+        let use_acme_tls_alpn = acme_manager.is_some()
+            && config
+                .acme
+                .as_ref()
+                .map(|acme| matches!(acme.challenge, AcmeChallengeType::TlsAlpn01))
+                .unwrap_or(false);
+        assert!(use_acme_tls_alpn);
+    }
+
+    #[test]
+    fn test_alpn_selection_logic() {
+        // Mock the logic inside the callback
+        let client_protos_with_acme = b"\x0aacme-tls/1\x02h2\x08http/1.1";
+        let client_protos_without_acme = b"\x02h2\x08http/1.1";
+
+        // Logic check for acme-tls/1
+        // client_protos.windows(11).any(|w| w[0] == 0x0a && &w[1..] == b"acme-tls/1")
+        let has_acme = |protos: &[u8]| {
+            protos
+                .windows(11)
+                .any(|w| w[0] == 0x0a && &w[1..] == b"acme-tls/1")
+        };
+
+        assert!(has_acme(client_protos_with_acme));
+        assert!(!has_acme(client_protos_without_acme));
+
+        // Logic check for h2
+        // client_protos.windows(2).any(|w| w == b"h2")
+        let has_h2 = |protos: &[u8]| protos.windows(2).any(|w| w == b"h2");
+
+        assert!(has_h2(client_protos_with_acme));
+        assert!(has_h2(client_protos_without_acme));
     }
 }

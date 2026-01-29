@@ -32,9 +32,9 @@ impl App {
         };
 
         app.add_extension(crate::extensions::metrics::MetricsExtension);
-        app.add_extension(HttpExtension);
-        app.add_extension(HttpsExtension);
+
         // Register ACME extension if configured
+        // Must be added before HttpsExtension so HttpsExtension can find AcmeManager in AppCtx
         if let Some(acme_settings) = &app.config.acme {
             let acme_ext = AcmeExtension::new(acme_settings, Arc::new(app.config.clone()));
             let acme_filter = AcmeFilter {
@@ -43,6 +43,9 @@ impl App {
             app.add_extension(acme_ext.clone());
             app.add_filter(acme_filter);
         }
+
+        app.add_extension(HttpExtension);
+        app.add_extension(HttpsExtension);
         app
     }
 
