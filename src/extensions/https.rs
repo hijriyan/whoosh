@@ -125,8 +125,26 @@ impl WhooshExtension for HttpsExtension {
             };
 
             let cert_paths = match (&ssl.server_cert, &ssl.server_key) {
-                (Some(cert), Some(key)) if Path::new(cert).exists() && Path::new(key).exists() => {
+                (Some(cert), Some(key)) => {
+                    if !Path::new(cert).exists() {
+                        return Err(WhooshError::Tls(format!(
+                            "Certificate file not found: {}",
+                            cert
+                        )));
+                    }
+                    if !Path::new(key).exists() {
+                        return Err(WhooshError::Tls(format!(
+                            "Private key file not found: {}",
+                            key
+                        )));
+                    }
                     Some((cert, key))
+                }
+                (Some(_), None) | (None, Some(_)) => {
+                    log::error!("Both server_cert and server_key must be specified together");
+                    return Err(WhooshError::Tls(
+                        "Both server_cert and server_key must be specified together".to_string(),
+                    ));
                 }
                 _ => None,
             };
@@ -136,7 +154,10 @@ impl WhooshExtension for HttpsExtension {
                     Ok(pair) => Some(pair),
                     Err(e) => {
                         log::error!("Failed to load TLS certs from config: {}", e);
-                        None
+                        return Err(WhooshError::Tls(format!(
+                            "Failed to load TLS certs from config: {}",
+                            e
+                        )));
                     }
                 }
             } else {
@@ -157,10 +178,18 @@ impl WhooshExtension for HttpsExtension {
             // Set initial certificate on the acceptor
             if let Some((cert, key)) = fallback_pair.as_ref() {
                 if let Err(e) = ssl_acceptor.set_private_key(key) {
-                    log::error!("Failed to set base private key: {}", e);
+                    log::error!("Failed to set fallback private key: {}", e);
+                    return Err(WhooshError::Tls(format!(
+                        "Failed to set fallback private key: {}",
+                        e
+                    )));
                 }
                 if let Err(e) = ssl_acceptor.set_certificate(cert) {
-                    log::error!("Failed to set base certificate: {}", e);
+                    log::error!("Failed to set fallback certificate: {}", e);
+                    return Err(WhooshError::Tls(format!(
+                        "Failed to set fallback certificate: {}",
+                        e
+                    )));
                 }
             }
 
@@ -180,7 +209,7 @@ impl WhooshExtension for HttpsExtension {
             if use_acme_tls_alpn {
                 let acme_manager_for_alpn = acme_manager.clone();
                 ssl_acceptor.set_alpn_select_callback(move |ssl_ref, client_protos| {
-                    log::info!("ALPN selection callback triggered (ACME mode)");
+                    log::debug!("ALPN selection callback triggered (ACME mode)");
 
                     // Helper to parse OpenSSL ALPN wire format (len1, proto1, len2, proto2...)
                     let mut found_acme = false;
@@ -207,7 +236,7 @@ impl WhooshExtension for HttpsExtension {
                             log::debug!("ACME TLS-ALPN-01 support requested for {}", name);
                             if let Some(am) = acme_manager_for_alpn.as_ref() {
                                 if am.get_certificate_cached(name, true).is_some() {
-                                    log::info!("Selecting acme-tls/1 for {}", name);
+                                    log::debug!("Selecting acme-tls/1 for {}", name);
                                     return Ok(b"acme-tls/1");
                                 } else {
                                     log::warn!(
@@ -225,7 +254,7 @@ impl WhooshExtension for HttpsExtension {
                 });
             } else {
                 ssl_acceptor.set_alpn_select_callback(|_, client_protos| {
-                    log::info!("ALPN selection callback triggered (Standard mode)");
+                    log::debug!("ALPN selection callback triggered (Standard mode)");
                     if client_protos.windows(2).any(|w| w == b"h2") {
                         Ok(b"h2")
                     } else {
@@ -254,7 +283,7 @@ impl WhooshExtension for HttpsExtension {
                                     for intermediate in cached.certificate_chain.iter().skip(1) {
                                         let _ = ssl_ref.add_chain_cert(intermediate.clone());
                                     }
-                                    log::info!(
+                                    log::debug!(
                                         "Successfully applied ACME certificate (cached) for {}",
                                         name
                                     );
@@ -314,6 +343,12 @@ impl WhooshExtension for HttpsExtension {
             }
 
             if let Some(cacert) = &ssl.cacert {
+                if !Path::new(cacert).exists() {
+                    return Err(WhooshError::Tls(format!(
+                        "CA certificate file not found: {}",
+                        cacert
+                    )));
+                }
                 if let Err(e) = ssl_acceptor.set_ca_file(cacert) {
                     log::error!("Failed to set CA file {}: {}", cacert, e);
                     return Err(WhooshError::Tls(format!(

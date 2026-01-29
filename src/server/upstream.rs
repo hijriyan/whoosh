@@ -100,14 +100,6 @@ impl UpstreamManager {
             });
             let backends = Backends::new(discovery);
             let load_balancer = LoadBalancer::from_backends(backends);
-
-            // Initialize the load balancer within a temporary runtime
-            // TODO: Refactor to avoid blocking runtime in initialization if possible
-            let rt = tokio::runtime::Runtime::new().map_err(|e| WhooshError::Io(e))?;
-            rt.block_on(load_balancer.update()).map_err(|e| {
-                WhooshError::Upstream(format!("Discovery error for {}: {}", upstream.name, e))
-            })?;
-
             // Wrap in Arc and LbWrapper
             let lb_arc = Arc::new(load_balancer);
             load_balancers.insert(upstream.name.clone(), lb_arc.clone());

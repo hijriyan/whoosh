@@ -283,15 +283,15 @@ impl AcmeManager {
             return Err("No domains provided".into());
         }
 
-        log::info!("Starting ACME order for domains: {:?}", domains);
+        log::debug!("Starting ACME order for domains: {:?}", domains);
 
         // 1. Get or Create ACME Account
         let account = if let Some(creds_json) = self.load_account() {
-            log::info!("Loading existing ACME account");
+            log::debug!("Loading existing ACME account");
             let creds: AccountCredentials = serde_json::from_str(&creds_json)?;
             Account::builder()?.from_credentials(creds).await?
         } else {
-            log::info!("Creating new ACME account");
+            log::debug!("Creating new ACME account");
             let contact = format!("mailto:{}", self.settings.email);
             let new_account = NewAccount {
                 contact: &[&contact],
@@ -305,7 +305,7 @@ impl AcmeManager {
 
             let creds_json = serde_json::to_string(&credentials)?;
             self.save_account(creds_json)?;
-            log::info!("ACME account created and saved");
+            log::debug!("ACME account created and saved");
             account
         };
 
@@ -360,7 +360,7 @@ impl AcmeManager {
                         // Add TLS-ALPN challenge cert to cache immediately for handshake
                         if let Err(e) = self.add_to_cert_store(domain.clone(), &cert_pem, &key_pem)
                         {
-                            log::warn!(
+                            log::error!(
                                 "Failed to add TLS-ALPN cert for {} to cache: {}",
                                 domain,
                                 e
@@ -370,7 +370,7 @@ impl AcmeManager {
                             .insert(domain.clone(), (cert_pem, key_pem));
                         domains_to_cleanup.push(domain.clone());
                         tokens_to_cleanup.push(token.clone());
-                        log::info!("Generated TLS-ALPN certificate for domain: {}", domain);
+                        log::debug!("Generated TLS-ALPN certificate for domain: {}", domain);
                     }
                     Err(e) => {
                         log::error!(
@@ -383,7 +383,7 @@ impl AcmeManager {
                 }
             }
 
-            log::info!("Prepared challenge for token: {}", token);
+            log::debug!("Prepared challenge for token: {}", token);
 
             // Signal to ACME server that we are ready
             challenge.set_ready().await?;
@@ -402,7 +402,7 @@ impl AcmeManager {
 
             if attempt < max_retries {
                 let delay_secs = 2u64.pow(attempt - 1); // Exponential backoff: 1, 2, 4, 8 seconds
-                log::info!(
+                log::debug!(
                     "Order not ready (status: {:?}), retrying in {} seconds (attempt {}/{})",
                     state,
                     delay_secs,
@@ -438,12 +438,12 @@ impl AcmeManager {
         let csr = params.serialize_request(&key_pair)?;
         let private_key_pem = key_pair.serialize_pem();
 
-        log::info!("Finalizing order with CSR");
+        log::debug!("Finalizing order with CSR");
         order.finalize_csr(csr.der()).await?;
 
         // 5. Download Certificate
         let cert_pem = order.poll_certificate(&RetryPolicy::default()).await?;
-        log::info!("Certificate received");
+        log::debug!("Certificate received");
 
         // Add to cache immediately after obtaining certificate
         if let Some(first_domain) = domains.first() {
