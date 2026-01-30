@@ -3355,6 +3355,7 @@ dependencies = [
  "http",
  "instant-acme",
  "log",
+ "once_cell",
  "openssl",
  "pingora",
  "prometheus",

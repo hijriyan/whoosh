@@ -1,7 +1,8 @@
 use crate::router::matcher::Matcher;
 use arc_swap::ArcSwap;
+use once_cell::sync::Lazy;
 use std::collections::HashSet;
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Mutex};
 use tldextract_rs::{Source, SuffixList, TLDExtract};
 
 // Define the type for a rule parser factory
@@ -12,26 +13,17 @@ pub type RouterRuleParser = Arc<
 >;
 
 // Global registry for custom router rules using ArcSwap for lock-free reads
-static ROUTER_REGISTRY: OnceLock<ArcSwap<Vec<RouterRuleParser>>> = OnceLock::new();
-static HOST_REGISTRY: OnceLock<ArcSwap<Vec<String>>> = OnceLock::new();
-static TLDEXTRACTOR: OnceLock<Mutex<TLDExtract>> = OnceLock::new();
+static ROUTER_REGISTRY: Lazy<ArcSwap<Vec<RouterRuleParser>>> =
+    Lazy::new(|| ArcSwap::from_pointee(Vec::new()));
 
-fn get_registry() -> &'static ArcSwap<Vec<RouterRuleParser>> {
-    ROUTER_REGISTRY.get_or_init(|| ArcSwap::from_pointee(Vec::new()))
-}
+static HOST_REGISTRY: Lazy<ArcSwap<Vec<String>>> = Lazy::new(|| ArcSwap::from_pointee(Vec::new()));
 
-fn get_host_registry() -> &'static ArcSwap<Vec<String>> {
-    HOST_REGISTRY.get_or_init(|| ArcSwap::from_pointee(Vec::new()))
-}
-
-fn get_tld_extractor() -> &'static Mutex<TLDExtract> {
-    TLDEXTRACTOR.get_or_init(|| {
-        let source = Source::Snapshot;
-        let suffix = SuffixList::new(source, false, None);
-        let extractor = TLDExtract::new(suffix, true).unwrap();
-        Mutex::new(extractor)
-    })
-}
+static TLDEXTRACTOR: Lazy<Mutex<TLDExtract>> = Lazy::new(|| {
+    let source = Source::Snapshot;
+    let suffix = SuffixList::new(source, false, None);
+    let extractor = TLDExtract::new(suffix, true).unwrap();
+    Mutex::new(extractor)
+});
 
 /// Register a custom router rule parser
 pub fn register_router_rule<F>(parser: F)
@@ -41,7 +33,7 @@ where
         + Sync
         + 'static,
 {
-    let registry = get_registry();
+    let registry = &ROUTER_REGISTRY;
     let parser = Arc::new(parser);
     // rcu (Read-Copy-Update) allows atomic updates without locking readers
     registry.rcu(move |old| {
@@ -55,7 +47,7 @@ where
 pub fn parse_custom_rules(
     input: &mut &str,
 ) -> std::result::Result<Box<dyn Matcher>, winnow::error::ContextError> {
-    let registry = get_registry();
+    let registry = &ROUTER_REGISTRY;
     let parsers = registry.load();
 
     let mut last_err = None;
@@ -84,7 +76,7 @@ pub fn register_hosts<I>(hosts: I)
 where
     I: IntoIterator<Item = String>,
 {
-    let mut extractor = get_tld_extractor().lock().unwrap();
+    let mut extractor = TLDEXTRACTOR.lock().unwrap();
 
     let mut incoming: Vec<String> = Vec::new();
     for host in hosts {
@@ -123,7 +115,7 @@ where
         return;
     }
 
-    let registry = get_host_registry();
+    let registry = &HOST_REGISTRY;
     registry.rcu(move |old| {
         let mut set: HashSet<String> = old.iter().cloned().collect();
         for host in &incoming {
@@ -134,7 +126,7 @@ where
 }
 
 pub fn get_registered_hosts() -> Vec<String> {
-    get_host_registry().load().to_vec()
+    HOST_REGISTRY.load().to_vec()
 }
 
 #[cfg(test)]

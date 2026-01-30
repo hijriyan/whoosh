@@ -33,6 +33,7 @@ tldextract-rs = { git = "https://github.com/emo-crab/tldextract-rs" }
 prometheus = "0.13"
 flate2 = "1.1.0"
 hickory-resolver = { version = "0.24", features = ["tokio", "tokio-runtime"] }
+once_cell = "1.21.3"
 
 [dev-dependencies]
 criterion = "0.8.1"
