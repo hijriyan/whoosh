@@ -1,6 +1,8 @@
 use crate::config::models::WhooshConfig;
 use crate::error::WhooshError;
-use crate::server::discovery::DnsDiscovery;
+use crate::extensions::dns::DnsResolver;
+use crate::server::context::AppCtx;
+use crate::server::discovery::WhooshUpstreamDiscovery;
 use crate::server::proxy::{CachedPeerConfig, merge_peer_options};
 use arc_swap::ArcSwap;
 use async_trait::async_trait;
@@ -32,7 +34,14 @@ pub struct UpstreamManager {
 }
 
 impl UpstreamManager {
-    pub fn new(config: Arc<WhooshConfig>) -> Result<(Self, Vec<LbBackgroundService>), WhooshError> {
+    pub fn new(app_ctx: &AppCtx) -> Result<(Self, Vec<LbBackgroundService>), WhooshError> {
+        let config = app_ctx
+            .get::<WhooshConfig>()
+            .ok_or_else(|| WhooshError::Config("WhooshConfig not found in AppCtx".into()))?;
+        let dns_resolver = app_ctx
+            .get::<DnsResolver>()
+            .ok_or_else(|| WhooshError::Upstream("DnsResolver not found in AppCtx".into()))?;
+
         let mut load_balancers = HashMap::new();
         let mut services: Vec<LbBackgroundService> = Vec::new();
 
@@ -95,9 +104,9 @@ impl UpstreamManager {
             }
 
             // Use Box for discovery as required by Backends
-            let discovery: Box<dyn ServiceDiscovery + Send + Sync> = Box::new(DnsDiscovery {
-                servers: server_configs,
-            });
+            let discovery: Box<dyn ServiceDiscovery + Send + Sync> = Box::new(
+                WhooshUpstreamDiscovery::new(server_configs, dns_resolver.clone()),
+            );
             let backends = Backends::new(discovery);
             let load_balancer = LoadBalancer::from_backends(backends);
             // Wrap in Arc and LbWrapper
@@ -122,6 +131,15 @@ impl UpstreamManager {
     pub fn get(&self, name: &str) -> Option<Arc<LoadBalancer<Weighted>>> {
         self.load_balancers.load().get(name).cloned()
     }
+
+    /// Manually triggers discovery for all load balancers.
+    /// Useful for tests or ensuring initial state before serving.
+    pub async fn update_backends(&self) {
+        let lbs = self.load_balancers.load();
+        for lb in lbs.values() {
+            let _ = lb.update().await;
+        }
+    }
 }
 
 #[cfg(test)]
@@ -129,8 +147,8 @@ mod tests {
     use super::*;
     use crate::config::models::{PeerOptions, Upstream, UpstreamServer};
 
-    #[test]
-    fn test_sni_fallback() {
+    #[tokio::test]
+    async fn test_sni_fallback() {
         // We'll simulate the logic inside UpstreamManager::new by extracting the relevant block
         // or just testing the result via creating a config.
         // Creating config is cleaner as it tests integration.
@@ -169,8 +187,13 @@ mod tests {
             },
         ];
 
-        let (manager, _) =
-            UpstreamManager::new(Arc::new(config)).expect("Failed to create manager");
+        let app_ctx = AppCtx::new();
+        app_ctx.insert(config.clone());
+        let resolver = DnsResolver::new(&config);
+        app_ctx.insert(resolver);
+
+        let (manager, _) = UpstreamManager::new(&app_ctx).expect("Failed to create manager");
+        manager.update_backends().await;
 
         // To verify, we would ideally inspect the CachedPeerConfig in the LoadBalancer.
         // However, LoadBalancer internals are private.

@@ -126,15 +126,21 @@ pub struct WhooshProxy {
 }
 
 impl WhooshProxy {
-    pub fn new(
-        config: Arc<WhooshConfig>,
-        router: Arc<Router>,
-        filters: Arc<Vec<Arc<dyn WhooshFilter>>>,
-        websocket_extensions: Arc<Vec<Arc<dyn WebsocketExtension>>>,
-        app_ctx: Arc<AppCtx>,
-        upstream_manager: Arc<UpstreamManager>,
-    ) -> Result<Self, WhooshError> {
+    pub fn new(router: Arc<Router>, app_ctx: Arc<AppCtx>) -> Result<Self, WhooshError> {
+        let config = app_ctx
+            .get::<WhooshConfig>()
+            .ok_or_else(|| WhooshError::Config("WhooshConfig not found in AppCtx".to_string()))?;
+        let filters = app_ctx
+            .get::<Vec<Arc<dyn WhooshFilter>>>()
+            .unwrap_or_else(|| Arc::new(Vec::new()));
+        let websocket_extensions = app_ctx
+            .get::<Vec<Arc<dyn WebsocketExtension>>>()
+            .unwrap_or_else(|| Arc::new(Vec::new()));
+        let upstream_manager = app_ctx.get::<UpstreamManager>().ok_or_else(|| {
+            WhooshError::Config("UpstreamManager not found in AppCtx".to_string())
+        })?;
         let metrics = app_ctx.get::<PrometheusBackend>();
+
         Ok(WhooshProxy {
             config,
             router,
@@ -714,6 +720,7 @@ fn close_frame(payload: Option<Vec<u8>>) -> WsFrame {
 mod tests {
     use super::*;
     use crate::config::models::{Upstream, UpstreamServer, WhooshConfig};
+    use crate::extensions::dns::DnsResolver;
     use crate::server::context::AppCtx;
     use crate::server::router::{ALL_PROTOCOLS, Router};
     use crate::server::service::ServiceManager;
@@ -760,8 +767,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_load_balancer_creation() {
+    #[tokio::test]
+    async fn test_load_balancer_creation() {
         // Create a test configuration with multiple servers
         let mut config = WhooshConfig::default();
 
@@ -794,9 +801,16 @@ mod tests {
         let service_manager = Arc::new(
             ServiceManager::new(config_arc.clone()).expect("Failed to create ServiceManager"),
         );
-        let (upstream_manager, _services) =
-            UpstreamManager::new(config_arc.clone()).expect("Failed to create UpstreamManager");
-        let upstream_manager = Arc::new(upstream_manager);
+
+        let app_ctx = AppCtx::new();
+        app_ctx.insert(config.clone());
+        app_ctx.insert(DnsResolver::new(&config));
+
+        let (upstream_manager_struct, _services) =
+            UpstreamManager::new(&app_ctx).expect("Failed to create UpstreamManager");
+        upstream_manager_struct.update_backends().await;
+        app_ctx.insert(upstream_manager_struct);
+        let upstream_manager = app_ctx.get::<UpstreamManager>().unwrap();
 
         // Create router
         let router = Arc::new(Router::new(
@@ -805,20 +819,10 @@ mod tests {
             &ALL_PROTOCOLS,
             &config,
         ));
-        let filters = Arc::new(vec![]);
-        let websocket_extensions = Arc::new(vec![]);
-        let app_ctx = Arc::new(AppCtx::new());
 
         // Create the proxy with load balancers
-        let _proxy = WhooshProxy::new(
-            Arc::new(config),
-            router,
-            filters,
-            websocket_extensions,
-            app_ctx,
-            upstream_manager.clone(),
-        )
-        .expect("Failed to create WhooshProxy");
+        let _proxy = WhooshProxy::new(router, Arc::new(app_ctx.clone()))
+            .expect("Failed to create WhooshProxy");
 
         // Verify load balancer was created
         assert!(upstream_manager.get("test_upstream").is_some());
@@ -844,8 +848,8 @@ mod tests {
         assert_eq!(backend_8081.weight, 2); // Weight should be 2 for port 8081
     }
 
-    #[test]
-    fn test_load_balancer_selection() {
+    #[tokio::test]
+    async fn test_load_balancer_selection() {
         // Create a test configuration
         let mut config = WhooshConfig::default();
 
@@ -872,9 +876,16 @@ mod tests {
         let service_manager = Arc::new(
             ServiceManager::new(config_arc.clone()).expect("Failed to create ServiceManager"),
         );
-        let (upstream_manager, _services) =
-            UpstreamManager::new(config_arc.clone()).expect("Failed to create UpstreamManager");
-        let upstream_manager = Arc::new(upstream_manager);
+
+        let app_ctx = AppCtx::new();
+        app_ctx.insert(config.clone());
+        app_ctx.insert(DnsResolver::new(&config));
+
+        let (upstream_manager_struct, _services) =
+            UpstreamManager::new(&app_ctx).expect("Failed to create UpstreamManager");
+        upstream_manager_struct.update_backends().await;
+        app_ctx.insert(upstream_manager_struct);
+        let upstream_manager = app_ctx.get::<UpstreamManager>().unwrap();
 
         let router = Arc::new(Router::new(
             service_manager,
@@ -882,19 +893,9 @@ mod tests {
             &ALL_PROTOCOLS,
             &config,
         ));
-        let filters = Arc::new(vec![]);
-        let websocket_extensions = Arc::new(vec![]);
-        let app_ctx = Arc::new(AppCtx::new());
 
-        let _proxy = WhooshProxy::new(
-            Arc::new(config),
-            router,
-            filters,
-            websocket_extensions,
-            app_ctx,
-            upstream_manager.clone(),
-        )
-        .expect("Failed to create WhooshProxy");
+        let _proxy = WhooshProxy::new(router, Arc::new(app_ctx.clone()))
+            .expect("Failed to create WhooshProxy");
 
         let load_balancer = upstream_manager.get("test_upstream").unwrap();
 
@@ -938,9 +939,15 @@ mod tests {
         let service_manager = Arc::new(
             ServiceManager::new(config_arc.clone()).expect("Failed to create ServiceManager"),
         );
-        let (upstream_manager, _services) =
-            UpstreamManager::new(config_arc.clone()).expect("Failed to create UpstreamManager");
-        let upstream_manager = Arc::new(upstream_manager);
+
+        let app_ctx = AppCtx::new();
+        app_ctx.insert(config.clone());
+        app_ctx.insert(DnsResolver::new(&config));
+
+        let (upstream_manager_struct, _services) =
+            UpstreamManager::new(&app_ctx).expect("Failed to create UpstreamManager");
+        app_ctx.insert(upstream_manager_struct);
+        let upstream_manager = app_ctx.get::<UpstreamManager>().unwrap();
 
         let router = Arc::new(Router::new(
             service_manager,
@@ -948,19 +955,9 @@ mod tests {
             &ALL_PROTOCOLS,
             &config,
         ));
-        let filters = Arc::new(vec![]);
-        let websocket_extensions = Arc::new(vec![]);
-        let app_ctx = Arc::new(AppCtx::new());
 
-        let _proxy = WhooshProxy::new(
-            Arc::new(config),
-            router,
-            filters,
-            websocket_extensions,
-            app_ctx,
-            upstream_manager.clone(),
-        )
-        .expect("Failed to create WhooshProxy");
+        let _proxy = WhooshProxy::new(router, Arc::new(app_ctx.clone()))
+            .expect("Failed to create WhooshProxy");
 
         // Should not create load balancer for empty upstream
         assert!(upstream_manager.get("empty_upstream").is_none());

@@ -19,10 +19,27 @@ pub struct WhooshConfig {
     pub upstreams: Vec<Upstream>,
     #[serde(default)]
     pub services: Vec<Service>,
+    #[serde(default)]
+    pub dns: Option<DnsSettings>,
 
     // Allow for extra configuration that might not be strictly defined
     #[serde(flatten)]
     pub extra: HashMap<String, serde_yaml::Value>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, Default)]
+pub struct DnsSettings {
+    pub nameservers: Option<Vec<String>>,
+    pub timeout: Option<u64>,
+    pub attempts: Option<usize>,
+    pub strategy: Option<String>,
+    pub cache_size: Option<usize>,
+    #[serde(default = "default_true")]
+    pub use_hosts_file: bool,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, Default)]

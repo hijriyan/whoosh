@@ -1,5 +1,6 @@
 use crate::config::models::{ServerConf, WhooshConfig};
 use crate::extensions::acme::{AcmeExtension, AcmeFilter};
+use crate::extensions::dns::{DnsExtension, DnsResolver};
 use crate::extensions::http::HttpExtension;
 use crate::extensions::https::HttpsExtension;
 use crate::server::context::AppCtx;
@@ -47,6 +48,7 @@ impl App {
             app.add_filter(acme_filter);
         }
 
+        app.add_extension(DnsExtension);
         app.add_extension(HttpExtension);
         app.add_extension(HttpsExtension);
         app
@@ -75,8 +77,16 @@ impl App {
 
         let config_arc = Arc::new(self.config.clone());
 
+        // Share resources via AppCtx for extensions to use (moved up)
+        app_ctx.insert(self.config.clone());
+
+        // Initialize DNS Resolver early
+        // Initialize DNS Resolver early
+        let dns_resolver = DnsResolver::new(&self.config);
+        app_ctx.insert(dns_resolver);
+
         // Initialize UpstreamManager
-        let (upstream_manager, lb_services) = UpstreamManager::new(config_arc.clone())?;
+        let (upstream_manager, lb_services) = UpstreamManager::new(&app_ctx)?;
 
         // Initialize ServiceManager
         let service_manager = ServiceManager::new(config_arc.clone())?;
@@ -86,8 +96,7 @@ impl App {
             server.add_service(service);
         }
 
-        // Share resources via AppCtx for extensions to use
-        app_ctx.insert(self.config.clone());
+        // Share global filters and websocket extensions
 
         // Share global filters and websocket extensions
         app_ctx.insert(self.filters);

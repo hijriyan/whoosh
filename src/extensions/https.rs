@@ -2,7 +2,7 @@ use crate::config::models::WhooshConfig;
 use crate::error::WhooshError;
 use crate::extensions::acme::AcmeManager;
 use crate::server::context::AppCtx;
-use crate::server::extension::{WebsocketExtension, WhooshExtension, WhooshFilter};
+use crate::server::extension::WhooshExtension;
 use crate::server::proxy::WhooshProxy;
 use crate::server::router::{HTTPS_PROTOCOLS, Router};
 use crate::server::service::ServiceManager;
@@ -79,12 +79,6 @@ impl WhooshExtension for HttpsExtension {
             return Ok(());
         }
 
-        let filters = app_ctx
-            .get::<Vec<Arc<dyn WhooshFilter>>>()
-            .unwrap_or_else(|| Arc::new(Vec::new()));
-        let websocket_extensions = app_ctx
-            .get::<Vec<Arc<dyn WebsocketExtension>>>()
-            .unwrap_or_else(|| Arc::new(Vec::new()));
         let acme_manager = app_ctx.get::<AcmeManager>();
         let upstream_manager = app_ctx.get::<UpstreamManager>().ok_or_else(|| {
             WhooshError::Config("UpstreamManager not found in AppCtx".to_string())
@@ -101,14 +95,7 @@ impl WhooshExtension for HttpsExtension {
         ));
 
         // WhooshProxy::new returns only proxy
-        let proxy = WhooshProxy::new(
-            config.clone(),
-            router,
-            filters,
-            websocket_extensions,
-            Arc::new(app_ctx.clone()),
-            upstream_manager,
-        )?;
+        let proxy = WhooshProxy::new(router, Arc::new(app_ctx.clone()))?;
 
         // Services are already added by App from UpstreamManager
 

@@ -33,7 +33,7 @@ cargo build --release
 ## 🔨 Usage
 
 ```sh
-./target/release/whoosh whoosh.yaml
+./target/release/whoosh whoosh.yml
 ```
 
-see [whoosh.yaml](whoosh.yaml) for an example config.
+see [whoosh.yml](whoosh.yml) for an example config.

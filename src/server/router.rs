@@ -1,4 +1,5 @@
 use crate::config::models::ServiceProtocol;
+
 use crate::server::service::ServiceManager;
 use crate::server::upstream::UpstreamManager;
 use crate::transformer::{RequestTransformer, ResponseTransformer};
@@ -71,6 +72,8 @@ impl Router {
 mod tests {
     use super::*;
     use crate::config::models::{Route, Rule, Service, ServiceProtocol, WhooshConfig};
+    use crate::extensions::dns::DnsResolver;
+    use crate::server::context::AppCtx;
 
     fn create_test_config() -> WhooshConfig {
         let mut config = WhooshConfig::default();
@@ -145,8 +148,13 @@ mod tests {
         let service_manager = Arc::new(
             ServiceManager::new(config_arc.clone()).expect("Failed to create ServiceManager"),
         );
+
+        let app_ctx = AppCtx::new();
+        app_ctx.insert(config.clone());
+        app_ctx.insert(DnsResolver::new(&config));
+
         let (upstream_manager, _) =
-            UpstreamManager::new(config_arc.clone()).expect("Failed to create UpstreamManager");
+            UpstreamManager::new(&app_ctx).expect("Failed to create UpstreamManager");
         let upstream_manager = Arc::new(upstream_manager);
 
         // Test HTTP router (should only include HTTP-compatible services)
