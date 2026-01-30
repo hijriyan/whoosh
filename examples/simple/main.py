@@ -25,6 +25,11 @@ async def websocket_endpoint(websocket: WebSocket):
                     print("<< bytes: ", bytes_msg)
                     await websocket.send_bytes(bytes_msg)
                     print(">> bytes: ", bytes_msg)
+        except RuntimeError as e:
+            if "disconnect message" in str(e):
+                print("Client disconnected")
+                break
+            raise e
         except WebSocketDisconnect:
             print("Client disconnected")
             break
