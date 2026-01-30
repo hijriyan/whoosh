@@ -426,6 +426,12 @@ impl ProxyHttp for WhooshProxy {
             return Ok(());
         };
 
+        // Fast path: if no extensions, pass through without parsing
+        if self.websocket_extensions.is_empty() {
+            *body = Some(chunk);
+            return Ok(());
+        }
+
         // Reuse buffer to avoid frequent reallocations
         ctx.ws_client_buf.extend_from_slice(&chunk);
         let mut frames = Vec::with_capacity(16); // Pre-allocate reasonable capacity
@@ -519,6 +525,13 @@ impl ProxyHttp for WhooshProxy {
         let Some(chunk) = body.take() else {
             return Ok(None);
         };
+
+        // Fast path: if no extensions, pass through without parsing
+        if self.websocket_extensions.is_empty() {
+            *body = Some(chunk);
+            return Ok(None);
+        }
+
         ctx.ws_upstream_buf.extend_from_slice(&chunk);
         let mut frames = Vec::new();
         match parse_ws_frames(&mut ctx.ws_upstream_buf, &mut frames) {
