@@ -91,7 +91,7 @@ impl WhooshExtension for HttpsExtension {
             service_manager,
             upstream_manager.clone(),
             &HTTPS_PROTOCOLS,
-            &config,
+            // &config,
         );
 
         // WhooshProxy::new returns only proxy

@@ -32,7 +32,7 @@ impl Router {
         service_manager: Arc<ServiceManager>,
         upstream_manager: Arc<UpstreamManager>,
         protocols: &[ServiceProtocol],
-        _config: &crate::config::models::WhooshConfig,
+        // _config: &crate::config::models::WhooshConfig,
     ) -> Arc<Self> {
         let service_indices = service_manager.get_indices_for_protocols(protocols);
 
@@ -189,7 +189,7 @@ mod tests {
             service_manager.clone(),
             upstream_manager.clone(),
             &HTTP_PROTOCOLS,
-            &config,
+            // &config,
         );
         assert_eq!(http_router.service_indices.load().len(), 3);
 
@@ -198,7 +198,7 @@ mod tests {
             service_manager.clone(),
             upstream_manager.clone(),
             &HTTPS_PROTOCOLS,
-            &config,
+            // &config,
         );
         assert_eq!(https_router.service_indices.load().len(), 3);
 
@@ -207,7 +207,7 @@ mod tests {
             service_manager.clone(),
             upstream_manager.clone(),
             &ALL_PROTOCOLS,
-            &config,
+            // &config,
         );
         assert_eq!(all_router.service_indices.load().len(), 4);
     }
@@ -234,7 +234,7 @@ mod tests {
             service_manager.clone(),
             upstream_manager.clone(),
             &HTTP_PROTOCOLS,
-            &config,
+            // &config,
         );
 
         // Initial state: 3 HTTP-compatible services

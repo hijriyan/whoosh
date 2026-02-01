@@ -30,7 +30,7 @@ impl WhooshExtension for HttpExtension {
             service_manager,
             upstream_manager.clone(),
             &HTTP_PROTOCOLS,
-            &config,
+            // &config,
         );
 
         let proxy = WhooshProxy::new(router, Arc::new(app_ctx.clone()))?;

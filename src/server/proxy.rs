@@ -830,7 +830,7 @@ mod tests {
             service_manager,
             upstream_manager.clone(),
             &ALL_PROTOCOLS,
-            &config,
+            // &config,
         );
 
         // Create the proxy with load balancers
@@ -904,7 +904,7 @@ mod tests {
             service_manager,
             upstream_manager.clone(),
             &ALL_PROTOCOLS,
-            &config,
+            // &config,
         );
 
         let _proxy = WhooshProxy::new(router, Arc::new(app_ctx.clone()))
@@ -966,7 +966,7 @@ mod tests {
             service_manager,
             upstream_manager.clone(),
             &ALL_PROTOCOLS,
-            &config,
+            // &config,
         );
 
         let _proxy = WhooshProxy::new(router, Arc::new(app_ctx.clone()))
