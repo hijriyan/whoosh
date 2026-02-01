@@ -826,12 +826,12 @@ mod tests {
         let upstream_manager = app_ctx.get::<UpstreamManager>().unwrap();
 
         // Create router
-        let router = Arc::new(Router::new(
+        let router = Router::new(
             service_manager,
             upstream_manager.clone(),
             &ALL_PROTOCOLS,
             &config,
-        ));
+        );
 
         // Create the proxy with load balancers
         let _proxy = WhooshProxy::new(router, Arc::new(app_ctx.clone()))
@@ -900,12 +900,12 @@ mod tests {
         app_ctx.insert(upstream_manager_struct);
         let upstream_manager = app_ctx.get::<UpstreamManager>().unwrap();
 
-        let router = Arc::new(Router::new(
+        let router = Router::new(
             service_manager,
             upstream_manager.clone(),
             &ALL_PROTOCOLS,
             &config,
-        ));
+        );
 
         let _proxy = WhooshProxy::new(router, Arc::new(app_ctx.clone()))
             .expect("Failed to create WhooshProxy");
@@ -962,12 +962,12 @@ mod tests {
         app_ctx.insert(upstream_manager_struct);
         let upstream_manager = app_ctx.get::<UpstreamManager>().unwrap();
 
-        let router = Arc::new(Router::new(
+        let router = Router::new(
             service_manager,
             upstream_manager.clone(),
             &ALL_PROTOCOLS,
             &config,
-        ));
+        );
 
         let _proxy = WhooshProxy::new(router, Arc::new(app_ctx.clone()))
             .expect("Failed to create WhooshProxy");

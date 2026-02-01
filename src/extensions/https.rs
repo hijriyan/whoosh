@@ -87,12 +87,12 @@ impl WhooshExtension for HttpsExtension {
             .get::<ServiceManager>()
             .ok_or_else(|| WhooshError::Config("ServiceManager not found in AppCtx".to_string()))?;
 
-        let router = Arc::new(Router::new(
+        let router = Router::new(
             service_manager,
             upstream_manager.clone(),
             &HTTPS_PROTOCOLS,
             &config,
-        ));
+        );
 
         // WhooshProxy::new returns only proxy
         let proxy = WhooshProxy::new(router, Arc::new(app_ctx.clone()))?;

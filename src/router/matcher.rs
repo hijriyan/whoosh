@@ -9,6 +9,7 @@ pub trait Matcher: Send + Sync + Debug {
     fn get_hosts(&self) -> Vec<String> {
         Vec::new()
     }
+    fn clone_box(&self) -> Box<dyn Matcher>;
 }
 
 // Global regex compilation cache
@@ -55,6 +56,12 @@ impl Matcher for HostMatcher {
     fn get_hosts(&self) -> Vec<String> {
         vec![self.host.clone()]
     }
+
+    fn clone_box(&self) -> Box<dyn Matcher> {
+        Box::new(HostMatcher {
+            host: self.host.clone(),
+        })
+    }
 }
 
 #[derive(Debug)]
@@ -75,6 +82,12 @@ impl Matcher for HostRegexpMatcher {
                 .map(|h| self.regex.is_match(h))
                 .unwrap_or(false)
     }
+
+    fn clone_box(&self) -> Box<dyn Matcher> {
+        Box::new(HostRegexpMatcher {
+            regex: self.regex.clone(),
+        })
+    }
 }
 
 #[derive(Debug)]
@@ -85,6 +98,12 @@ pub struct PathMatcher {
 impl Matcher for PathMatcher {
     fn matches(&self, req: &RequestHeader) -> bool {
         req.uri.path() == self.path
+    }
+
+    fn clone_box(&self) -> Box<dyn Matcher> {
+        Box::new(PathMatcher {
+            path: self.path.clone(),
+        })
     }
 }
 
@@ -97,6 +116,12 @@ impl Matcher for PathRegexpMatcher {
     fn matches(&self, req: &RequestHeader) -> bool {
         self.regex.is_match(req.uri.path())
     }
+
+    fn clone_box(&self) -> Box<dyn Matcher> {
+        Box::new(PathRegexpMatcher {
+            regex: self.regex.clone(),
+        })
+    }
 }
 
 #[derive(Debug)]
@@ -108,6 +133,12 @@ impl Matcher for PathPrefixMatcher {
     fn matches(&self, req: &RequestHeader) -> bool {
         req.uri.path().starts_with(&self.prefix)
     }
+
+    fn clone_box(&self) -> Box<dyn Matcher> {
+        Box::new(PathPrefixMatcher {
+            prefix: self.prefix.clone(),
+        })
+    }
 }
 
 #[derive(Debug)]
@@ -118,6 +149,12 @@ pub struct MethodMatcher {
 impl Matcher for MethodMatcher {
     fn matches(&self, req: &RequestHeader) -> bool {
         req.method.as_str() == self.method
+    }
+
+    fn clone_box(&self) -> Box<dyn Matcher> {
+        Box::new(MethodMatcher {
+            method: self.method.clone(),
+        })
     }
 }
 
@@ -134,6 +171,13 @@ impl Matcher for HeaderRegexpMatcher {
             .and_then(|v| v.to_str().ok())
             .map(|v| self.regex.is_match(v))
             .unwrap_or(false)
+    }
+
+    fn clone_box(&self) -> Box<dyn Matcher> {
+        Box::new(HeaderRegexpMatcher {
+            name: self.name.clone(),
+            regex: self.regex.clone(),
+        })
     }
 }
 
@@ -159,6 +203,13 @@ impl Matcher for QueryRegexpMatcher {
         }
         false
     }
+
+    fn clone_box(&self) -> Box<dyn Matcher> {
+        Box::new(QueryRegexpMatcher {
+            key: self.key.clone(),
+            regex: self.regex.clone(),
+        })
+    }
 }
 
 #[derive(Debug)]
@@ -173,6 +224,12 @@ impl Matcher for AndMatcher {
 
     fn get_hosts(&self) -> Vec<String> {
         self.matchers.iter().flat_map(|m| m.get_hosts()).collect()
+    }
+
+    fn clone_box(&self) -> Box<dyn Matcher> {
+        Box::new(AndMatcher {
+            matchers: self.matchers.iter().map(|m| m.clone_box()).collect(),
+        })
     }
 }
 
@@ -189,6 +246,12 @@ impl Matcher for OrMatcher {
     fn get_hosts(&self) -> Vec<String> {
         self.matchers.iter().flat_map(|m| m.get_hosts()).collect()
     }
+
+    fn clone_box(&self) -> Box<dyn Matcher> {
+        Box::new(OrMatcher {
+            matchers: self.matchers.iter().map(|m| m.clone_box()).collect(),
+        })
+    }
 }
 
 #[derive(Debug)]
@@ -203,5 +266,11 @@ impl Matcher for NotMatcher {
 
     fn get_hosts(&self) -> Vec<String> {
         self.matcher.get_hosts()
+    }
+
+    fn clone_box(&self) -> Box<dyn Matcher> {
+        Box::new(NotMatcher {
+            matcher: self.matcher.clone_box(),
+        })
     }
 }

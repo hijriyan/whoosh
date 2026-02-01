@@ -1,5 +1,5 @@
 use arc_swap::ArcSwap;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use crate::config::models::{ServiceProtocol, WhooshConfig};
 use crate::router::parse_rule;
@@ -28,121 +28,127 @@ pub struct RuntimeRoute {
 
 pub struct RuntimeService {
     pub name: String,
-    pub host: String, // Upstream name
+    pub host: Arc<str>, // Upstream name
     pub protocols: Vec<ServiceProtocol>,
     pub routes: Vec<RuntimeRoute>,
+    pub config: Arc<crate::config::models::Service>,
 }
 
 /// ServiceManager compiles services and rules from config and stores them grouped by protocol.
 pub struct ServiceManager {
     /// All compiled services
     services: ArcSwap<Vec<RuntimeService>>,
+    /// Callbacks to notify when services change
+    callbacks: Mutex<Vec<Box<dyn Fn() + Send + Sync>>>,
 }
 
 use crate::error::WhooshError;
+
+fn compile_service(
+    service: &Arc<crate::config::models::Service>,
+) -> Result<RuntimeService, WhooshError> {
+    let mut routes = Vec::new();
+
+    for route_config in &service.routes {
+        for rule_config in &route_config.rules {
+            let matcher = match parse_rule(&rule_config.rule) {
+                Ok(m) => m,
+                Err(e) => {
+                    return Err(WhooshError::Config(format!(
+                        "Rule parse error [service={}, route={}, rule={}]: {}",
+                        service.name, route_config.name, rule_config.rule, e
+                    )));
+                }
+            };
+
+            let req_transformer =
+                rule_config
+                    .request_transformer
+                    .as_ref()
+                    .and_then(|t_str| match parse_transformers(t_str) {
+                        Ok(t) => Some(Arc::from(t)),
+                        Err(e) => {
+                            log::error!(
+                                "Request transformer parse error [service={}, route={}, transformer={}]: {}",
+                                service.name,
+                                route_config.name,
+                                t_str,
+                                e
+                            );
+                            None
+                        }
+                    });
+
+            let res_transformer = rule_config
+                .response_transformer
+                .as_ref()
+                .and_then(|t_str| match parse_response_transformers(t_str) {
+                    Ok(t) => Some(Arc::from(t)),
+                    Err(e) => {
+                        log::error!(
+                            "Response transformer parse error [service={}, route={}, transformer={}]: {}",
+                            service.name,
+                            route_config.name,
+                            t_str,
+                            e
+                        );
+                        None
+                    }
+                });
+
+            routes.push(RuntimeRoute {
+                matcher,
+                priority: rule_config.priority.unwrap_or(0),
+                req_transformer,
+                res_transformer,
+            });
+        }
+    }
+
+    routes.sort_by(|a, b| b.priority.cmp(&a.priority));
+
+    let runtime_service = RuntimeService {
+        name: service.name.clone(),
+        host: Arc::from(service.host.as_str()),
+        protocols: service.protocols.clone(),
+        routes,
+        config: service.clone(),
+    };
+
+    // Register hosts for ACME
+    use crate::router::registry::register_hosts;
+    let mut hosts = std::collections::HashSet::new();
+    for route in &runtime_service.routes {
+        for host in route.matcher.get_hosts() {
+            hosts.insert(host);
+        }
+    }
+    register_hosts(hosts);
+
+    Ok(runtime_service)
+}
 
 impl ServiceManager {
     pub fn new(config: Arc<WhooshConfig>) -> Result<Self, WhooshError> {
         let services = Self::compile_services(&config);
         Ok(Self {
             services: ArcSwap::from_pointee(services),
+            callbacks: Mutex::new(Vec::new()),
         })
     }
 
     fn compile_services(config: &WhooshConfig) -> Vec<RuntimeService> {
-        use crate::router::registry::register_hosts;
-
-        // Sequential service compilation
-        let services: Vec<RuntimeService> = config
+        config
             .services
             .iter()
-            .map(|svc_config| {
-                let mut routes = Vec::new();
-
-                for route_config in &svc_config.routes {
-                    for rule_config in &route_config.rules {
-                        // Parse Matcher
-                        let matcher = match parse_rule(&rule_config.rule) {
-                            Ok(m) => m,
-                            Err(e) => {
-                                log::error!(
-                                    "Rule parse error [service={}, route={}, rule={}]: {}",
-                                    svc_config.name,
-                                    route_config.name,
-                                    rule_config.rule,
-                                    e
-                                );
-                                continue;
-                            }
-                        };
-
-                        // Parse Request Transformer
-                        let req_transformer = rule_config.request_transformer.as_ref().and_then(
-                            |t_str| match parse_transformers(t_str) {
-                                Ok(t) => Some(Arc::from(t)),
-                                Err(e) => {
-                                    log::error!(
-                                    "Request transformer parse error [service={}, route={}, transformer={}]: {}",
-                                    svc_config.name,
-                                    route_config.name,
-                                    t_str,
-                                    e
-                                );
-                                    None
-                                }
-                            },
-                        );
-
-                        // Parse Response Transformer
-                        let res_transformer = rule_config.response_transformer.as_ref().and_then(
-                            |t_str| match parse_response_transformers(t_str) {
-                                Ok(t) => Some(Arc::from(t)),
-                                Err(e) => {
-                                    log::error!(
-                                    "Response transformer parse error [service={}, route={}, transformer={}]: {}",
-                                    svc_config.name,
-                                    route_config.name,
-                                    t_str,
-                                    e
-                                );
-                                    None
-                                }
-                            },
-                        );
-
-                        routes.push(RuntimeRoute {
-                            matcher,
-                            priority: rule_config.priority.unwrap_or(0),
-                            req_transformer,
-                            res_transformer,
-                        });
-                    }
-                }
-
-                // Sort routes by priority (descending)
-                routes.sort_by(|a, b| b.priority.cmp(&a.priority));
-
-                RuntimeService {
-                    name: svc_config.name.clone(),
-                    host: svc_config.host.clone(),
-                    protocols: svc_config.protocols.clone(),
-                    routes,
+            .filter_map(|svc_config| match compile_service(svc_config) {
+                Ok(svc) => Some(svc),
+                Err(e) => {
+                    log::error!("Failed to compile service {}: {}", svc_config.name, e);
+                    None
                 }
             })
-            .collect();
-
-        // Batch register all hosts for ACME (performance optimization)
-        let mut all_hosts = std::collections::HashSet::new();
-        for svc in &services {
-            for route in &svc.routes {
-                for host in route.matcher.get_hosts() {
-                    all_hosts.insert(host);
-                }
-            }
-        }
-        register_hosts(all_hosts);
-
-        services
+            .collect()
     }
 
     /// Get indices of services matching allowed protocols.
@@ -174,6 +180,209 @@ impl ServiceManager {
     pub fn reload(&self, config: &WhooshConfig) {
         let services = Self::compile_services(config);
         self.services.store(Arc::new(services));
+        self.notify_callbacks();
+    }
+
+    /// Register a callback to be notified when services change
+    pub fn add_services_changed_callback<F>(&self, callback: F)
+    where
+        F: Fn() + Send + Sync + 'static,
+    {
+        self.callbacks.lock().unwrap().push(Box::new(callback));
+    }
+
+    /// Notify all registered callbacks that services have changed
+    fn notify_callbacks(&self) {
+        let callbacks = self.callbacks.lock().unwrap();
+        for callback in callbacks.iter() {
+            callback();
+        }
+    }
+
+    /// List all services
+    pub fn list_services(&self) -> Vec<RuntimeService> {
+        let services = self.services.load();
+        // Clone the services for external use
+        services
+            .iter()
+            .map(|svc| RuntimeService {
+                name: svc.name.clone(),
+                host: svc.host.clone(),
+                protocols: svc.protocols.clone(),
+                routes: Vec::new(), // Don't clone routes for listing
+                config: svc.config.clone(),
+            })
+            .collect()
+    }
+
+    /// Verify if a service exists
+    pub fn verify_service(&self, name: &str) -> bool {
+        let services = self.services.load();
+        services.iter().any(|svc| svc.name == name)
+    }
+
+    /// Add a new service dynamically
+    pub fn add_service(&self, service: crate::config::models::Service) -> Result<(), WhooshError> {
+        let service = Arc::new(service);
+        // Check if service already exists
+        if self.verify_service(&service.name) {
+            return Err(WhooshError::Config(format!(
+                "Service {} already exists",
+                service.name
+            )));
+        }
+
+        // Compile the new service
+        let runtime_service = compile_service(&service)?;
+
+        // Add to services
+        self.services.rcu(|old| {
+            let mut next = Vec::with_capacity(old.len() + 1);
+            for svc in old.iter() {
+                next.push(RuntimeService {
+                    name: svc.name.clone(),
+                    host: svc.host.clone(),
+                    protocols: svc.protocols.clone(),
+                    routes: svc
+                        .routes
+                        .iter()
+                        .map(|r| RuntimeRoute {
+                            matcher: r.matcher.clone_box(),
+                            priority: r.priority,
+                            req_transformer: r.req_transformer.clone(),
+                            res_transformer: r.res_transformer.clone(),
+                        })
+                        .collect(),
+                    config: svc.config.clone(),
+                });
+            }
+            next.push(RuntimeService {
+                name: runtime_service.name.clone(),
+                host: runtime_service.host.clone(),
+                protocols: runtime_service.protocols.clone(),
+                routes: runtime_service
+                    .routes
+                    .iter()
+                    .map(|r| RuntimeRoute {
+                        matcher: r.matcher.clone_box(),
+                        priority: r.priority,
+                        req_transformer: r.req_transformer.clone(),
+                        res_transformer: r.res_transformer.clone(),
+                    })
+                    .collect(),
+                config: runtime_service.config.clone(),
+            });
+            next
+        });
+
+        self.notify_callbacks();
+        log::info!("Added service: {}", service.name);
+        Ok(())
+    }
+
+    /// Update an existing service
+    pub fn update_service(
+        &self,
+        name: &str,
+        service: crate::config::models::Service,
+    ) -> Result<(), WhooshError> {
+        let service = Arc::new(service);
+        // Check if service exists
+        if !self.verify_service(name) {
+            return Err(WhooshError::Config(format!(
+                "Service {} does not exist",
+                name
+            )));
+        }
+
+        // Compile the updated service
+        let runtime_service = compile_service(&service)?;
+
+        // Update service
+        self.services.rcu(|old| {
+            let mut next = Vec::with_capacity(old.len());
+            for svc in old.iter() {
+                if svc.name == name {
+                    next.push(RuntimeService {
+                        name: runtime_service.name.clone(),
+                        host: runtime_service.host.clone(),
+                        protocols: runtime_service.protocols.clone(),
+                        routes: runtime_service
+                            .routes
+                            .iter()
+                            .map(|r| RuntimeRoute {
+                                matcher: r.matcher.clone_box(),
+                                priority: r.priority,
+                                req_transformer: r.req_transformer.clone(),
+                                res_transformer: r.res_transformer.clone(),
+                            })
+                            .collect(),
+                        config: runtime_service.config.clone(),
+                    });
+                } else {
+                    next.push(RuntimeService {
+                        name: svc.name.clone(),
+                        host: svc.host.clone(),
+                        protocols: svc.protocols.clone(),
+                        routes: svc
+                            .routes
+                            .iter()
+                            .map(|r| RuntimeRoute {
+                                matcher: r.matcher.clone_box(),
+                                priority: r.priority,
+                                req_transformer: r.req_transformer.clone(),
+                                res_transformer: r.res_transformer.clone(),
+                            })
+                            .collect(),
+                        config: svc.config.clone(),
+                    });
+                }
+            }
+            next
+        });
+
+        self.notify_callbacks();
+        log::info!("Updated service: {}", name);
+        Ok(())
+    }
+
+    /// Remove a service
+    pub fn remove_service(&self, name: &str) -> Result<(), WhooshError> {
+        // Check if service exists
+        if !self.verify_service(name) {
+            log::warn!("Service {} does not exist, skipping remove", name);
+            return Ok(());
+        }
+
+        // Remove service
+        self.services.rcu(|old| {
+            let mut next = Vec::with_capacity(old.len());
+            for svc in old.iter() {
+                if svc.name != name {
+                    next.push(RuntimeService {
+                        name: svc.name.clone(),
+                        host: svc.host.clone(),
+                        protocols: svc.protocols.clone(),
+                        routes: svc
+                            .routes
+                            .iter()
+                            .map(|r| RuntimeRoute {
+                                matcher: r.matcher.clone_box(),
+                                priority: r.priority,
+                                req_transformer: r.req_transformer.clone(),
+                                res_transformer: r.res_transformer.clone(),
+                            })
+                            .collect(),
+                        config: svc.config.clone(),
+                    });
+                }
+            }
+            next
+        });
+
+        self.notify_callbacks();
+        log::info!("Removed service: {}", name);
+        Ok(())
     }
 }
 
@@ -211,7 +420,10 @@ mod tests {
                 protocols: vec![],
                 routes: vec![],
             },
-        ];
+        ]
+        .into_iter()
+        .map(Arc::new)
+        .collect();
 
         let manager =
             ServiceManager::new(Arc::new(config)).expect("Failed to create ServiceManager");
@@ -273,7 +485,10 @@ mod tests {
                     },
                 ],
             }],
-        }];
+        }]
+        .into_iter()
+        .map(Arc::new)
+        .collect();
 
         let manager =
             ServiceManager::new(Arc::new(config)).expect("Failed to create ServiceManager");

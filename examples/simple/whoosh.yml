@@ -1,6 +1,15 @@
 whoosh:
   http_listen: "[::]:2023"
   metrics_listen: "[::]:9090"
+  api:
+    listen: "[::]:8080"
+    basic_auth:
+      username: "admin"
+      password: "password"
+    openapi:
+      # title: "Whoosh API"
+      # description: "Whoosh Management API"
+      # root_path: "/docs"
 
   upstreams:
     - name: fastapi

@@ -51,6 +51,16 @@ impl App {
         app.add_extension(DnsExtension);
         app.add_extension(HttpExtension);
         app.add_extension(HttpsExtension);
+
+        // Register API extension if configured
+        if let Some(api_settings) = &app.config.api {
+            if api_settings.listen.is_some() {
+                app.add_extension(crate::extensions::api::ApiExtension::new(
+                    api_settings.clone(),
+                ));
+            }
+        }
+
         app
     }
 
@@ -80,7 +90,6 @@ impl App {
         // Share resources via AppCtx for extensions to use (moved up)
         app_ctx.insert(self.config.clone());
 
-        // Initialize DNS Resolver early
         // Initialize DNS Resolver early
         let dns_resolver = DnsResolver::new(&self.config);
         app_ctx.insert(dns_resolver);

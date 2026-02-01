@@ -81,6 +81,10 @@ mod tests {
         fn matches(&self, _req: &RequestHeader) -> bool {
             true
         }
+
+        fn clone_box(&self) -> Box<dyn Matcher> {
+            Box::new(CustomMatcher)
+        }
     }
 
     #[test]

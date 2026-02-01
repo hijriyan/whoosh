@@ -79,7 +79,7 @@ impl ConfigBuilder {
     }
 
     pub fn add_service(mut self, service: Service) -> Self {
-        self.config.services.push(service);
+        self.config.services.push(std::sync::Arc::new(service));
         self
     }
 

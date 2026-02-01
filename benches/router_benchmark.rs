@@ -13,6 +13,10 @@ impl Matcher for BenchmarkMatcher {
     fn matches(&self, _req: &RequestHeader) -> bool {
         true
     }
+
+    fn clone_box(&self) -> Box<dyn Matcher> {
+        Box::new(BenchmarkMatcher)
+    }
 }
 
 fn parse_benchmark_rule(

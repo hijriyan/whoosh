@@ -7,7 +7,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 pub struct RouteContext {
-    pub upstream_name: Option<String>,
+    pub upstream_name: Option<Arc<str>>,
     pub response_transformer: Option<Arc<dyn ResponseTransformer>>,
     pub is_upgrade: bool,
     pub ws_client_buf: BytesMut,
